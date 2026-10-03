@@ -3,6 +3,7 @@ import type { LocalTool } from "./agent-loop.ts";
 import type { FsGuard } from "./fs-guard.ts";
 import { stageWrite } from "./staging.ts";
 import { checkCommand, runWhitelisted, type CommandWhitelist } from "./whitelist.ts";
+import { verifyStagedOp } from "./verify.ts";
 import { searchFiles } from "./filesearch.ts";
 import { executeDynamicTool, getDynamicTool, listDynamicTools } from "./dynamic-tools.ts";
 
@@ -143,6 +144,58 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
           (r.stderr ? `\n[stderr]\n${r.stderr}` : "") +
           (r.ok ? "" : `\n[exit ${r.code}]`)
         ).trim() || "(no output)";
+      },
+    });
+
+    tools.push({
+      spec: {
+        name: "verify_staged",
+        description:
+          "Check a staged write op WITHOUT touching the real file: the op's content is written to a " +
+          "temp file in the same directory (so imports/paths resolve identically), '{file}' in argv is " +
+          "replaced by that temp path (appended if absent), and the whitelisted command runs on it. " +
+          "Use after stage_write to lint/typecheck your staged draft — run_command on the original path " +
+          "sees the OLD on-disk content, not your stage. restore_paths lists files the command may " +
+          "rewrite (e.g. auto-updated baselines) — they are snapshotted and restored afterwards.",
+        parameters: OBJ(
+          {
+            op_id: { type: "string", description: "Staged op id from stage_write" },
+            argv: {
+              type: "array",
+              items: { type: "string" },
+              description: "Whitelisted command argv; '{file}' is replaced by the materialized temp path",
+            },
+            cwd: { type: "string", description: "Working directory (must be inside allowed roots)" },
+            restore_paths: {
+              type: "array",
+              items: { type: "string" },
+              description: "Files to snapshot and restore after the run (e.g. auto-rewritten baseline files)",
+            },
+          },
+          ["op_id", "argv"],
+        ),
+      },
+      async execute(args) {
+        try {
+          const r = await verifyStagedOp(guard, deps.whitelist, {
+            opId: String(args.op_id),
+            argv: (args.argv as unknown[]).map(String),
+            cwd: args.cwd ? String(args.cwd) : undefined,
+            restorePaths: Array.isArray(args.restore_paths)
+              ? (args.restore_paths as unknown[]).map(String)
+              : undefined,
+            timeoutMs: deps.runCommandTimeoutS * 1000,
+            maxOutputChars: deps.runCommandOutputChars,
+          });
+          return (
+            (r.timedOut ? `[timed out after ${deps.runCommandTimeoutS}s]\n` : "") +
+            (r.stdout || "") +
+            (r.stderr ? `\n[stderr]\n${r.stderr}` : "") +
+            (r.ok ? "" : `\n[exit ${r.code}]`)
+          ).trim() || "(no output)";
+        } catch (e) {
+          return `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
       },
     });
   }

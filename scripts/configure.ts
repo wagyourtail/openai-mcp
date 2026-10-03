@@ -41,7 +41,7 @@ const ALLOW_TOOLS = [
 const ASK_TOOLS = [
   "commit_write", "set_write_mode", "pull_model", "download_model",
   "delete_model", "prune_models", "register_tool", "unregister_tool",
-  "update_command_whitelist", "unload_model",
+  "update_command_whitelist", "unload_model", "verify_staged",
 ].map((t) => `mcp__local_llm__${t}`);
 
 interface ProviderDraft {
