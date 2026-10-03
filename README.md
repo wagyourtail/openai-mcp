@@ -29,12 +29,13 @@ free-tier version of Devin's cloud subagents.
 ### 1. Server config
 
 ```bash
-npm run configure     # interactive wizard: runs `npm install` if node_modules is missing, probes
-                      # ollama, writes ~/.config/openai-mcp/config.json, prefills from an existing
-                      # config (update mode), then offers to install the server into
-                      # ~/.config/devin/mcp_config.json AND merge recommended permissions into
-                      # ~/.config/devin/config.json (backs both up first)
-# or: cp config.example.json ~/.config/openai-mcp/config.json  (edit by hand)
+npm install           # required once — the server refuses to start without node_modules
+npm run configure     # interactive wizard: runs `npm install` itself if node_modules is missing,
+                      # probes ollama, writes ~/.config/openai-mcp/config.json, prefills from an
+                      # existing config (update mode), then covers steps 2 & 3 below — installs the
+                      # server into ~/.config/devin/mcp_config.json AND merges recommended
+                      # permissions into ~/.config/devin/config.json (backs both up first)
+# or: npm install && cp config.example.json ~/.config/openai-mcp/config.json  (edit by hand)
 ```
 
 **File roots are auto-detected.** Effective roots = `allowed_roots` (config) ∪ workspace roots the
@@ -44,6 +45,8 @@ project, and `allowed_roots` is for *extra* directories outside it. `deny_globs`
 everywhere. `get_server_info` shows each root with its source.
 
 ### 2. Register with Devin
+
+*`npm run configure` does this for you — shown here for manual setup.*
 
 **Devin settings → MCP → Add custom MCP** (or edit `~/.config/devin/mcp_config.json`):
 
@@ -73,6 +76,8 @@ CLI equivalent: `devin mcp add -s user local_llm -- node /path/to/openai-mcp/src
 Omit the two `LOCAL_LLM_*` env flags to disable shell access and dynamic tools entirely.
 
 ### 3. Recommended Devin permissions
+
+*`npm run configure` merges these for you (with a backup) — shown here for manual setup.*
 
 In `~/.config/devin/config.json`:
 
