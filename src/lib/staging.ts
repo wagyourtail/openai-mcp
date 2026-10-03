@@ -56,11 +56,18 @@ export function stageWrite(
   const p = guard.resolve(input.path);
   const existedBefore = existsSync(p);
   const old = existedBefore ? readFileSync(p, "utf-8") : "";
+  // Small models routinely drop the POSIX trailing newline — restore it on
+  // staged content so committed files are well-formed text. Reverts are
+  // exempt: they must restore byte-exact prior content.
+  const content =
+    input.source !== "revert" && input.content.length > 0 && !input.content.endsWith("\n")
+      ? input.content + "\n"
+      : input.content;
   const diff = createTwoFilesPatch(
     p + (existedBefore ? "" : " (new file)"),
     p + " (staged)",
     old,
-    input.content,
+    content,
     "current",
     "staged",
     { context: 3 },
@@ -68,7 +75,7 @@ export function stageWrite(
   const op: StagedOp = {
     id: randomBytes(8).toString("hex"),
     path: p,
-    newContent: input.content,
+    newContent: content,
     oldContent: old,
     stagedHash: sha256(old),
     diff,
