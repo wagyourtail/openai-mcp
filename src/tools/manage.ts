@@ -3,7 +3,7 @@ import { z } from "zod";
 import { execFile } from "node:child_process";
 import type { ServerContext } from "../context.ts";
 import { jsonResult } from "./helpers.ts";
-import { createJob, finishJob, getJob, listJobs, updateJob } from "../lib/jobs.ts";
+import { controlJob, createJob, finishJob, getJob, listJobs, updateJob, type JobAction } from "../lib/jobs.ts";
 import { systemResources } from "../lib/sysinfo.ts";
 import { getStats } from "../lib/usage.ts";
 import { safeEnv } from "../lib/whitelist.ts";
@@ -95,7 +95,9 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
       }
       const job = createJob("pull_model");
       updateJob(job.id, { model, provider: p.name });
-      p.pull(model, (prog) => updateJob(job.id, { model, ...prog }))
+      const ac = new AbortController();
+      job.abort = () => ac.abort();
+      p.pull(model, (prog) => updateJob(job.id, { model, ...prog }), ac.signal)
         .then(() => finishJob(job.id))
         .catch((e) => finishJob(job.id, e instanceof Error ? e.message : String(e)));
       return jsonResult({ job_id: job.id, model, provider: p.name, note: "Poll get_job for progress." });
@@ -140,6 +142,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           }
         },
       );
+      job.abort = () => child.kill();
       // Stream progress: hf writes progress bars to stderr/stdout — keep last line.
       const onData = (d: Buffer): void => {
         const tail = d.toString("utf-8").split("\n").filter(Boolean).pop();
@@ -165,6 +168,30 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
     "list_jobs",
     { description: "List background jobs (most recent first).", inputSchema: {} },
     async () => jsonResult({ jobs: listJobs() }),
+  );
+
+  server.registerTool(
+    "control_job",
+    {
+      description:
+        "Steer a running background job: pause (halt between agent steps), resume, " +
+        "cancel (aborts in-flight work too), or inject (append an operator instruction the local " +
+        "agent sees on its next step — for course-correcting a run_local_agent mid-flight).",
+      inputSchema: {
+        job_id: z.string(),
+        action: z.enum(["pause", "resume", "cancel", "inject"]),
+        message: z.string().optional().describe("Required for action=inject"),
+      },
+    },
+    async ({ job_id, action, message }) => {
+      const r = controlJob(job_id, action as JobAction, message);
+      if (!r.ok) throw new Error(r.reason);
+      return jsonResult({
+        job_id,
+        action,
+        control: { paused: r.control.paused, cancelled: r.control.cancelled, mailbox_pending: r.control.mailbox.length },
+      });
+    },
   );
 
   server.registerTool(

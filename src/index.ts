@@ -29,14 +29,30 @@ When NOT to use it: real reasoning, security-sensitive changes, architecture
 decisions, or anything where a wrong answer is worse than no answer — small models
 produce plausible garbage sometimes. Use verify:"self" for a second-pass check.
 
-Safety model:
-- The local model CANNOT write to disk directly. Its writes are staged ops;
-  review them with get_diff, then commit_write or discard_write.
-- run_command for the local agent is whitelist-only, argv-exec (no shell).
-- File access is limited to configured allowed_roots.
+PRAGMATIC WRITE WORKFLOW:
+- Default write_mode is "propose": nothing reaches disk. You review get_diff and
+  apply the change with YOUR OWN edit tools. Best for consequential changes —
+  the diff tokens are a fair price for keeping your native review flow.
+- For bulk mechanical batches (map_files over many files), propose mode forces
+  you to re-write every file — expensive. Instead: set_write_mode("write") for
+  the batch (it belongs in ask-permissions), review a SAMPLE of diffs with
+  get_diff, commit_write the batch, then revert_write anything bad. Set it back
+  to "propose" when done.
+- Long delegations: run_async:true, then steer with control_job — inject
+  corrections mid-flight, pause to think, cancel a runaway — instead of blocking.
 
-Workflow hint: call get_server_info first to see providers/roots/flags,
-list_models + get_system_resources to pick a model that fits VRAM, and
+INPUT-SIZING:
+- Prefer \`paths\` (agent reads on demand) over \`files\` (inlined) for anything
+  large or numerous — the small model's context is small; context_warning will
+  tell you when you've blown it.
+- Pick model by fit: code transforms -> a coder model, general text -> instruct
+  models. list_models + get_system_resources tell you what fits VRAM.
+
+Safety model: local-model writes are staged ops only; run_command is
+whitelist-only argv-exec (no shell); file access limited to detected+configured
+roots; dynamic tools + run_command need env flags.
+
+Workflow hint: call get_server_info first to see providers/roots/flags/mode, and
 get_usage_stats at the end of a session to see what you saved.`;
 
 async function main(): Promise<void> {

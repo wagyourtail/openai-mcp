@@ -34,6 +34,8 @@ async function doDelegate(
   ctx: ServerContext,
   p: DelegateParams,
   report: (msg: string, progress?: number) => void,
+  control?: { paused: boolean; cancelled: boolean; mailbox: string[] },
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const { provider, model: m } = pickModel(ctx, p.provider, p.model);
   const limits = ctx.config.limits;
@@ -93,6 +95,8 @@ async function doDelegate(
     timeoutS: p.timeout_s ?? limits.agent_timeout_s,
     toolResultChars: limits.max_tool_result_chars,
     onProgress: ({ step, note }) => report(note, step),
+    control,
+    signal,
   });
   const newOps = listOps().filter((o) => !opsBefore.has(o.id));
 
@@ -178,13 +182,24 @@ export function registerDelegateTools(server: McpServer, ctx: ServerContext): vo
       if (params.run_async) {
         const job = createJob("run_local_agent");
         updateJob(job.id, { task: params.task.slice(0, 200) });
-        void doDelegate(ctx, params, (msg, n) => {
-          updateJob(job.id, { step: n, last: msg });
-          report(msg, n);
-        })
+        const ac = new AbortController();
+        job.abort = () => ac.abort();
+        void doDelegate(
+          ctx,
+          params,
+          (msg, n) => {
+            updateJob(job.id, { step: n, last: msg });
+            report(msg, n);
+          },
+          job.control,
+          ac.signal,
+        )
           .then((r) => finishJob(job.id, undefined, r))
           .catch((e) => finishJob(job.id, e instanceof Error ? e.message : String(e)));
-        return jsonResult({ job_id: job.id, note: "Async — poll get_job(job_id) for progress; result lands in job.result." });
+        return jsonResult({
+          job_id: job.id,
+          note: "Async — poll get_job(job_id) for progress; result lands in job.result. Steer it with control_job (pause/resume/cancel/inject).",
+        });
       }
       return jsonResult(await doDelegate(ctx, params, report));
     },

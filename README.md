@@ -107,6 +107,7 @@ In `~/.config/devin/config.json`:
 | `list_models` | Models per provider (sizes, capabilities). |
 | `get_system_resources` | RAM + VRAM + loaded models (local ollama only). |
 | `pull_model` | Download a model on ollama — background job, poll `get_job`. |
+| `control_job` | Steer a running job: `pause`/`resume`/`cancel`/`inject` (inject = operator instruction the local agent sees next step). |
 | `download_model` | Download from Hugging Face via `hf` CLI (for llama.cpp/TabbyAPI/vLLM servers). Background job. |
 | `unload_model` | Free a model's VRAM. |
 | `register_tool` / `unregister_tool` / `list_dynamic_tools` | Give the local agent new tools at runtime (`shell` templates or `js` snippets). |

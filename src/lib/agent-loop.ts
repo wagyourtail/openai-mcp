@@ -1,4 +1,5 @@
 import type { ChatMessage, Provider, ToolSpec, Usage } from "../providers/index.ts";
+import type { JobControl } from "./jobs.ts";
 
 export interface LocalTool {
   spec: ToolSpec;
@@ -36,6 +37,10 @@ export async function runAgentLoop(params: {
   timeoutS: number;
   toolResultChars: number;
   onProgress?: (info: { step: number; note: string }) => void;
+  /** Operator control for async jobs: pause gate, cancel flag, injectable mailbox. */
+  control?: JobControl;
+  /** Abort signal tied to control.cancelled (kills an in-flight chat request). */
+  signal?: AbortSignal;
 }): Promise<AgentLoopResult> {
   const { provider, model } = params;
   const messages: ChatMessage[] = [
@@ -49,18 +54,51 @@ export async function runAgentLoop(params: {
   const callCounts = new Map<string, number>();
   const deadline = Date.now() + params.timeoutS * 1000;
 
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const finish = (extra?: Partial<AgentLoopResult>): AgentLoopResult => ({
+    finalAnswer: lastAssistantContent(messages),
+    steps,
+    usage,
+    ...extra,
+  });
+
   for (let step = 1; step <= params.maxSteps; step++) {
     if (Date.now() > deadline) {
-      return { finalAnswer: lastAssistantContent(messages), steps, usage, aborted: "timeout" };
+      return finish({ aborted: "timeout" });
     }
-    const res = await provider.chat({
-      model,
-      messages,
-      tools: specs.length ? specs : undefined,
-      temperature: params.temperature ?? 0.2,
-      num_ctx: params.numCtx,
-      signal: AbortSignal.timeout(Math.max(1000, deadline - Date.now())),
-    });
+    // Operator controls (async jobs only): cancel, pause gate, injected messages.
+    const ctl = params.control;
+    if (ctl?.cancelled) return finish({ aborted: "cancelled by operator" });
+    while (ctl?.paused && !ctl.cancelled) {
+      if (Date.now() > deadline) return finish({ aborted: "timeout while paused" });
+      await sleep(400);
+    }
+    if (ctl?.cancelled) return finish({ aborted: "cancelled by operator" });
+    if (ctl?.mailbox.length) {
+      for (const msg of ctl.mailbox.splice(0)) {
+        messages.push({ role: "user", content: `[operator instruction — adjust course] ${msg}` });
+        params.onProgress?.({ step, note: `injected: ${msg.slice(0, 80)}` });
+      }
+    }
+
+    let res;
+    try {
+      res = await provider.chat({
+        model,
+        messages,
+        tools: specs.length ? specs : undefined,
+        temperature: params.temperature ?? 0.2,
+        num_ctx: params.numCtx,
+        signal: params.signal
+          ? AbortSignal.any([AbortSignal.timeout(Math.max(1000, deadline - Date.now())), params.signal])
+          : AbortSignal.timeout(Math.max(1000, deadline - Date.now())),
+      });
+    } catch (e) {
+      if (ctl?.cancelled || params.signal?.aborted) {
+        return finish({ aborted: "cancelled by operator" });
+      }
+      throw e;
+    }
     usage.promptTokens += res.usage.promptTokens;
     usage.completionTokens += res.usage.completionTokens;
     usage.calls++;
