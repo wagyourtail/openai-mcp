@@ -29,7 +29,9 @@ free-tier version of Devin's cloud subagents.
 
 ```bash
 npm run configure     # interactive wizard: probes ollama, writes ~/.config/openai-mcp/config.json,
-                      # prints the Devin registration JSON
+                      # prefills from an existing config (update mode), then offers to install the
+                      # server into ~/.config/devin/mcp_config.json AND merge recommended
+                      # permissions into ~/.config/devin/config.json (backs both up first)
 # or: cp config.example.json ~/.config/openai-mcp/config.json  (edit by hand)
 ```
 
@@ -77,13 +79,13 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__get_diff", "mcp__local_llm__discard_write",
               "mcp__local_llm__get_usage_stats", "mcp__local_llm__list_dynamic_tools",
               "mcp__local_llm__get_command_whitelist", "mcp__local_llm__get_job",
-              "mcp__local_llm__list_jobs", "mcp__local_llm__get_server_info",
-              "mcp__local_llm__propose_write", "mcp__local_llm__list_commits",
-              "mcp__local_llm__revert_write"],
+              "mcp__local_llm__list_jobs", "mcp__local_llm__control_job",
+              "mcp__local_llm__get_server_info", "mcp__local_llm__propose_write",
+              "mcp__local_llm__list_commits", "mcp__local_llm__revert_write"],
     "ask":   ["mcp__local_llm__commit_write", "mcp__local_llm__set_write_mode",
               "mcp__local_llm__pull_model", "mcp__local_llm__download_model",
-              "mcp__local_llm__register_tool", "mcp__local_llm__update_command_whitelist",
-              "mcp__local_llm__unload_model"]
+              "mcp__local_llm__register_tool", "mcp__local_llm__unregister_tool",
+              "mcp__local_llm__update_command_whitelist", "mcp__local_llm__unload_model"]
   }
 }
 ```
