@@ -12,17 +12,20 @@ export interface GpuProcess {
 }
 
 export interface GpuInfo {
+  /** Enumeration index in whichever tool reported this GPU. NOT the DRM card number. */
   index: number;
+  /** DRM cardN (kernel order) — resolved via PCI match, never assumed == index. */
+  cardN?: number;
   name?: string;
   vendor?: string;
   driver?: string;
+  /** Canonical GPU identity: PCI bus id, e.g. "0000:04:00.0". */
   pciSlot?: string;
   /** True for iGPUs whose "VRAM" is shared system memory (Ryzen/Intel iGPUs). */
   integrated?: boolean;
   totalMB?: number;
   usedMB?: number;
   freeMB?: number;
-  /** Processes holding this GPU (when the reporting tool exposes them). */
   processes?: GpuProcess[];
 }
 
@@ -32,40 +35,195 @@ export interface SystemResources {
   note?: string;
 }
 
+/** "0000:04:00.0" | "00000000:04:00.0" | "04:00.0" → "04:00.0" (match key). */
+export function normPci(s?: string): string {
+  if (!s) return "";
+  return (s.trim().toLowerCase().match(/([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])$/)?.[1]) ?? s.trim().toLowerCase();
+}
+
 function vendorOf(name?: string): string | undefined {
   if (!name) return undefined;
   if (/nvidia|tesla|geforce|rtx|gtx|quadro/i.test(name)) return "nvidia";
-  if (/amd|radeon|instinct|ryzen/i.test(name)) return "amd";
-  if (/intel|arc|iris|xe\b|uhd/i.test(name)) return "intel";
+  if (/amd|ati|radeon|instinct|ryzen|navi/i.test(name)) return "amd";
+  if (/intel|arc|iris|xe\b|uhd|hd graphics/i.test(name)) return "intel";
   return undefined;
 }
 
 /** Integrated GPUs report shared system RAM as memory — flag them so callers don't size against it. */
 export function isIntegrated(name?: string): boolean {
-  return !!name && /ryzen|graphics|uhd|iris xe|apu|processor/i.test(name);
+  return !!name && /ryzen|graphics|uhd|iris xe|apu|processor|hd \d/i.test(name);
 }
 
-/** Best-effort PCI slot + driver for a DRM card index (Linux). */
-async function drmDeviceInfo(index: number): Promise<{ pciSlot?: string; driver?: string }> {
-  try {
-    const uevent = await readFile(`/sys/class/drm/card${index}/device/uevent`, "utf-8");
-    const pci = uevent.match(/^PCI_SLOT_NAME=(.+)$/m)?.[1];
-    const driver = uevent.match(/^DRIVER=(.+)$/m)?.[1];
-    return { pciSlot: pci, driver };
-  } catch {
-    return {};
+export function parseSizeMB(v: string | undefined, unit?: string): number | undefined {
+  if (!v) return undefined;
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return undefined;
+  switch ((unit ?? "").toLowerCase()) {
+    case "gib": return Math.round(n * 1024);
+    case "gb": return Math.round(n * 1000);
+    case "mib": case "mb": return Math.round(n);
+    case "kib": case "kb": return Math.round(n / 1024);
+    default: return Math.round(n / 1024 / 1024); // raw bytes
   }
 }
 
-async function enrichDrm(gpus: GpuInfo[]): Promise<void> {
-  await Promise.all(
-    gpus.map(async (g) => {
-      const info = await drmDeviceInfo(g.index);
-      g.pciSlot ??= info.pciSlot;
-      g.driver ??= info.driver;
-    }),
+// ---------------------------------------------------------------------------
+// DRM card enumeration + PCI identity (the canonical GPU key — never index).
+// ---------------------------------------------------------------------------
+
+export interface DrmCard {
+  cardN: number;
+  pciSlot: string;
+  driver?: string;
+  name?: string;
+}
+
+async function lspciNames(): Promise<Map<string, string>> {
+  const m = new Map<string, string>();
+  try {
+    const { stdout } = await execFileP("lspci", ["-D", "-nn"], { timeout: 5000 });
+    for (const line of stdout.split("\n")) {
+      const match = line.match(/^([0-9a-f:]+:[0-9a-f]{2}\.[0-9a-f])\s+\S+[^:]*:\s*(.+?)\s*\[[0-9a-f]{4}:[0-9a-f]{4}\]/i);
+      if (match) m.set(normPci(match[1]), match[2].replace(/\s*\(rev.*\)$/, ""));
+      else {
+        const loose = line.match(/^([0-9a-f:]+:[0-9a-f]{2}\.[0-9a-f])\s+\S+[^:]*:\s*(.+)$/i);
+        if (loose) m.set(normPci(loose[1]), loose[2].replace(/\s*\(rev.*\)$/, ""));
+      }
+    }
+  } catch {
+    /* no lspci */
+  }
+  return m;
+}
+
+export async function drmCards(): Promise<DrmCard[]> {
+  const names = await lspciNames();
+  const cards: DrmCard[] = [];
+  let entries: string[] = [];
+  try {
+    entries = await readdir("/sys/class/drm");
+  } catch {
+    return cards;
+  }
+  for (const e of entries) {
+    const m = e.match(/^card(\d+)$/);
+    if (!m) continue;
+    try {
+      const uevent = await readFile(`/sys/class/drm/${e}/device/uevent`, "utf-8");
+      const pci = uevent.match(/^PCI_SLOT_NAME=(.+)$/m)?.[1]?.trim();
+      if (!pci) continue;
+      cards.push({
+        cardN: Number(m[1]),
+        pciSlot: pci,
+        driver: uevent.match(/^DRIVER=(.+)$/m)?.[1]?.trim(),
+        name: names.get(normPci(pci)),
+      });
+    } catch {
+      /* unreadable card */
+    }
+  }
+  return cards;
+}
+
+const NAME_STOPWORDS = new Set(
+  "intel amd ati nvidia corporation inc advanced micro devices device graphics vga compatible controller 3d display co ltd tm r radeon geforce"
+    .split(" "),
+);
+
+function nameTokens(name?: string): Set<string> {
+  return new Set(
+    (name ?? "")
+      .toLowerCase()
+      .match(/[a-z0-9]+/g)
+      ?.filter((t) => !NAME_STOPWORDS.has(t)) ?? [],
   );
 }
+
+/** Shared distinctive tokens between two device names. */
+export function nameMatchScore(a?: string, b?: string): number {
+  const ta = nameTokens(a);
+  const tb = nameTokens(b);
+  let score = 0;
+  for (const t of ta) if (tb.has(t) && t.length >= 3) score++;
+  return score;
+}
+
+/**
+ * Bind each tool-reported GPU to a DRM card. Never matches by enumeration
+ * order: exact PCI bus id first, then device-name token score, then a
+ * single-candidate same-vendor fallback. Also fills sysfs VRAM for i915/xe/amdgpu.
+ */
+export function assignCards(gpus: GpuInfo[], cards: DrmCard[]): void {
+  const byPci = new Map(cards.map((c) => [normPci(c.pciSlot), c]));
+  const taken = new Set<number>();
+  // Exact PCI match (nvidia-smi --query-gpu=pci.bus_id, journal pci_id, …).
+  for (const g of gpus) {
+    const c = g.pciSlot ? byPci.get(normPci(g.pciSlot)) : undefined;
+    if (c) {
+      g.cardN = c.cardN;
+      g.pciSlot = c.pciSlot;
+      g.driver ??= c.driver;
+      g.name ??= c.name;
+      taken.add(c.cardN);
+    }
+  }
+  // Name-match the rest against remaining cards.
+  for (const g of gpus) {
+    if (g.cardN !== undefined) continue;
+    let best: DrmCard | undefined;
+    let bestScore = 0;
+    for (const c of cards) {
+      if (taken.has(c.cardN)) continue;
+      const s = nameMatchScore(g.name, c.name);
+      if (s > bestScore) {
+        bestScore = s;
+        best = c;
+      }
+    }
+    if (best && bestScore >= 1) {
+      g.cardN = best.cardN;
+      g.pciSlot = best.pciSlot;
+      g.driver ??= best.driver;
+      g.name ??= best.name;
+      taken.add(best.cardN);
+    }
+  }
+  // Single-candidate same-vendor fallback.
+  for (const g of gpus) {
+    if (g.cardN !== undefined || !g.vendor) continue;
+    const candidates = cards.filter((c) => !taken.has(c.cardN) && vendorOf(c.name) === g.vendor);
+    if (candidates.length === 1) {
+      const c = candidates[0];
+      g.cardN = c.cardN;
+      g.pciSlot = c.pciSlot;
+      g.driver ??= c.driver;
+      g.name ??= c.name;
+      taken.add(c.cardN);
+    }
+  }
+  for (const g of gpus) {
+    g.vendor ??= vendorOf(g.name);
+    g.integrated ??= isIntegrated(g.name) || undefined;
+  }
+}
+
+async function sysfsVramMB(cardN: number): Promise<{ totalMB?: number; usedMB?: number }> {
+  const read = async (f: string): Promise<number | undefined> => {
+    try {
+      const v = parseInt(await readFile(`/sys/class/drm/card${cardN}/device/${f}`, "utf-8"), 10);
+      return Number.isFinite(v) ? Math.round(v / 1024 / 1024) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const totalMB = await read("mem_info_vram_total");
+  const usedMB = await read("mem_info_vram_used");
+  return { totalMB, usedMB };
+}
+
+// ---------------------------------------------------------------------------
+// GPU probes (ordered: nvtop covers all vendors + processes).
+// ---------------------------------------------------------------------------
 
 interface NvtopDevice {
   device_name?: string;
@@ -101,15 +259,13 @@ export function parseNvtop(json: string): GpuInfo[] {
 
 async function nvtopGpus(): Promise<GpuInfo[]> {
   const { stdout } = await execFileP("nvtop", ["-s"], { timeout: 8000 });
-  const gpus = parseNvtop(stdout);
-  await enrichDrm(gpus);
-  return gpus;
+  return parseNvtop(stdout);
 }
 
 async function nvidiaGpus(): Promise<GpuInfo[]> {
   const { stdout } = await execFileP(
     "nvidia-smi",
-    ["--query-gpu=index,name,memory.total,memory.used", "--format=csv,noheader,nounits"],
+    ["--query-gpu=index,name,memory.total,memory.used,pci.bus_id", "--format=csv,noheader,nounits"],
     { timeout: 5000 },
   );
   const gpus: GpuInfo[] = stdout
@@ -117,7 +273,7 @@ async function nvidiaGpus(): Promise<GpuInfo[]> {
     .split("\n")
     .filter(Boolean)
     .map((line) => {
-      const [index, name, total, used] = line.split(",").map((s) => s.trim());
+      const [index, name, total, used, bus] = line.split(",").map((s) => s.trim());
       const t = Number(total);
       const u = Number(used);
       return {
@@ -127,9 +283,9 @@ async function nvidiaGpus(): Promise<GpuInfo[]> {
         totalMB: t,
         usedMB: u,
         freeMB: Number.isFinite(t) && Number.isFinite(u) ? t - u : undefined,
+        pciSlot: bus || undefined,
       };
     });
-  // Per-process attribution: nvidia-smi reports compute apps with gpu uuid/index.
   try {
     const { stdout: apps } = await execFileP(
       "nvidia-smi",
@@ -165,7 +321,7 @@ async function rocmGpus(): Promise<GpuInfo[]> {
   const iTotal = header.findIndex((h) => h.includes("total memory"));
   const iUsed = header.findIndex((h) => h.includes("total used"));
   if (iDevice < 0 || iTotal < 0 || iUsed < 0) throw new Error("unexpected rocm-smi csv format");
-  const gpus = lines
+  const gpus: GpuInfo[] = lines
     .slice(1)
     .filter(Boolean)
     .map((line) => {
@@ -180,7 +336,23 @@ async function rocmGpus(): Promise<GpuInfo[]> {
         freeMB: Math.round(t - u),
       };
     });
-  await enrichDrm(gpus);
+  // PCI bus per card, for identity.
+  try {
+    const { stdout: bus } = await execFileP("rocm-smi", ["--showbus", "--csv"], { timeout: 5000 });
+    const blines = bus.trim().split("\n");
+    const bhead = blines[0]?.split(",").map((h) => h.trim().toLowerCase()) ?? [];
+    const biDev = bhead.findIndex((h) => h.includes("device"));
+    const biBus = bhead.findIndex((h) => h.includes("pci bus"));
+    if (biDev >= 0 && biBus >= 0) {
+      for (const line of blines.slice(1).filter(Boolean)) {
+        const cols = line.split(",");
+        const g = gpus.find((x) => x.index === Number(cols[biDev]));
+        if (g) g.pciSlot = cols[biBus]?.trim() || undefined;
+      }
+    }
+  } catch {
+    /* rocm-smi without --showbus */
+  }
   return gpus;
 }
 
@@ -191,7 +363,6 @@ export async function systemResources(): Promise<SystemResources> {
     gpus: [],
   };
   const probes: { name: string; fn: () => Promise<GpuInfo[]> }[] = [
-    // nvtop covers NVIDIA + AMD + Intel uniformly and reports per-process usage.
     { name: "nvtop", fn: nvtopGpus },
     { name: "nvidia-smi", fn: nvidiaGpus },
     { name: "rocm-smi", fn: rocmGpus },
@@ -203,28 +374,51 @@ export async function systemResources(): Promise<SystemResources> {
       const gpus = await p.fn();
       if (gpus.length) {
         res.gpus = gpus;
-        return res;
+        break;
       }
     } catch {
       /* probe unavailable — try next */
     }
   }
-  res.note = `no GPU info found (tried: ${tried.join(", ")})`;
+  if (!res.gpus.length) {
+    res.note = `no GPU info found (tried: ${tried.join(", ")})`;
+    return res;
+  }
+  // Bind to DRM cards by PCI identity, then fill sysfs VRAM gaps (i915/xe/amdgpu).
+  const cards = await drmCards();
+  assignCards(res.gpus, cards);
+  const byCard = new Map(cards.map((c) => [c.cardN, c]));
+  await Promise.all(
+    res.gpus.map(async (g) => {
+      if (g.cardN === undefined || !byCard.has(g.cardN)) return;
+      const v = await sysfsVramMB(g.cardN);
+      g.totalMB ??= v.totalMB;
+      g.usedMB ??= v.usedMB;
+      if (g.freeMB === undefined && g.totalMB !== undefined && g.usedMB !== undefined) {
+        g.freeMB = g.totalMB - g.usedMB;
+      }
+    }),
+  );
   return res;
 }
 
 // ---------------------------------------------------------------------------
-// Ollama GPU placement: which GPU(s) the server is pinned to / using.
+// Ollama GPU placement: env pinning + runner device-fd attribution.
 // ---------------------------------------------------------------------------
 
-/** Env vars that decide which GPU(s) ollama lands on, per vendor. */
+/** Env vars that decide which GPU(s) ollama lands on, per vendor/backend. */
 const GPU_ENV_VARS = [
   "CUDA_VISIBLE_DEVICES", // nvidia
-  "HIP_VISIBLE_DEVICES", // amd
-  "ROCR_VISIBLE_DEVICES", // amd
+  "GGML_CUDA_VISIBLE_DEVICES", // llama.cpp cuda backend
+  "HIP_VISIBLE_DEVICES", // amd rocm
+  "ROCR_VISIBLE_DEVICES", // amd rocm
+  "GGML_VK_VISIBLE_DEVICES", // llama.cpp vulkan backend (Intel Arc path)
   "ONEAPI_DEVICE_SELECTOR", // intel (e.g. level_zero:0)
   "ZE_AFFINITY_MASK", // intel level-zero
   "GPU_DEVICE_ORDINAL", // amd
+  "VK_DEVICE_SELECT", // mesa vulkan selector
+  "VK_ICD_FILENAMES", // forces a specific vulkan ICD/driver
+  "DRI_PRIME", // mesa prime offloading
 ];
 
 const OLLAMA_PROC_RE = /ollama|llama-server|llama\.cpp/i;
@@ -251,7 +445,7 @@ async function findOllamaProcs(): Promise<ProcEntry[]> {
     if (!/^\d+$/.test(pid)) continue;
     const cmdline = (await readProcFile(Number(pid), "cmdline")).replace(/\0/g, " ").trim();
     if (!cmdline || !OLLAMA_PROC_RE.test(cmdline)) continue;
-    if (/^npm |^node |^bash |^sh -c|pgrep/.test(cmdline) && !/ollama (serve|runner)|llama-server/.test(cmdline)) continue;
+    if (/pgrep|grep .*ollama/.test(cmdline)) continue;
     out.push({
       pid: Number(pid),
       cmdline,
@@ -261,15 +455,149 @@ async function findOllamaProcs(): Promise<ProcEntry[]> {
   return out;
 }
 
-/** GPU-pinning env vars set on a process. */
-async function gpuEnvOf(pid: number): Promise<Record<string, string>> {
-  const raw = await readProcFile(pid, "environ");
+/** GPU-pinning env vars set on a process (empty object when /proc is denied). */
+async function gpuEnvOf(pid: number): Promise<{ env: Record<string, string>; readable: boolean }> {
+  let raw = "";
+  try {
+    raw = await readFile(`/proc/${pid}/environ`, "utf-8");
+  } catch {
+    return { env: {}, readable: false };
+  }
   const out: Record<string, string> = {};
   for (const kv of raw.split("\0")) {
     const i = kv.indexOf("=");
     if (i < 0) continue;
     const k = kv.slice(0, i);
-    if (GPU_ENV_VARS.includes(k) || /^OLLAMA_/i.test(k)) out[k] = kv.slice(i + 1);
+    if (GPU_ENV_VARS.includes(k) || /^OLLAMA_/i.test(k) || /^GGML_/i.test(k)) {
+      out[k] = kv.slice(i + 1);
+    }
+  }
+  return { env: out, readable: raw.length > 0 };
+}
+
+// --- systemd / journal fallbacks (ollama under systemd as another user) ---
+
+/** Parse `KEY=value` lines (systemd EnvironmentFile format). */
+export function parseEnvFile(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const i = line.indexOf("=");
+    if (i <= 0) continue;
+    const key = line.slice(0, i).trim();
+    let value = line.slice(i + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+/** Parse `systemctl show ollama` output → unit env + EnvironmentFile paths. */
+export function parseSystemdShow(text: string): { env: Record<string, string>; envFiles: string[] } {
+  const env: Record<string, string> = {};
+  const envFiles: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("Environment=")) {
+      for (const pair of line.slice("Environment=".length).trim().split(/\s+/)) {
+        const i = pair.indexOf("=");
+        if (i > 0) env[pair.slice(0, i)] = pair.slice(i + 1);
+      }
+    } else if (line.startsWith("EnvironmentFiles=")) {
+      for (const tok of line.slice("EnvironmentFiles=".length).trim().split(/\s+/)) {
+        if (tok.startsWith("/")) envFiles.push(tok);
+        else if (tok.startsWith("-/")) envFiles.push(tok.slice(1));
+      }
+    }
+  }
+  return { env, envFiles };
+}
+
+export interface InferenceDevice {
+  index: number;
+  family: string;
+  name: string;
+  pci: string;
+  totalMB: number;
+  availMB: number;
+}
+
+/** Parse ollama journal: `env=map[...]` plus `inference compute` device lines. */
+export function parseOllamaJournal(text: string): { env: Record<string, string>; devices: InferenceDevice[] } {
+  const env: Record<string, string> = {};
+  const devices: InferenceDevice[] = [];
+  for (const line of text.split("\n")) {
+    const envMatch = line.match(/env=map\[([^\]]+)\]/);
+    if (envMatch) {
+      for (const entry of envMatch[1].split(/\s+/).filter(Boolean)) {
+        const i = entry.indexOf(":");
+        if (i > 0) env[entry.slice(0, i)] = entry.slice(i + 1);
+      }
+      continue;
+    }
+    if (!/inference compute/.test(line)) continue;
+    const nameM = line.match(/\bname=(\S+)/);
+    const descM = line.match(/\bdescription="([^"]+)"/) ?? line.match(/\bdescription=(\S+)/);
+    const pciM = line.match(/\bpci_id=(\S+)/);
+    const totalM = line.match(/\btotal="?([\d.]+)\s*(GiB|MiB|GB|MB|KiB|KB)"?/i);
+    const availM = line.match(/\bavailable="?([\d.]+)\s*(GiB|MiB|GB|MB|KiB|KB)"?/i);
+    const nameTok = nameM?.[1] ?? "";
+    const idxM = nameTok.match(/(\d+)$/);
+    devices.push({
+      index: idxM ? Number(idxM[1]) : 0,
+      family: (idxM ? nameTok.slice(0, nameTok.length - idxM[1].length) : nameTok).toLowerCase(),
+      name: descM?.[1] ?? nameTok,
+      pci: pciM?.[1] ?? "",
+      totalMB: totalM ? (parseSizeMB(totalM[1], totalM[2]) ?? 0) : 0,
+      availMB: availM ? (parseSizeMB(availM[1], availM[2]) ?? 0) : 0,
+    });
+  }
+  return { env, devices };
+}
+
+async function ollamaJournal(): Promise<{ env: Record<string, string>; devices: InferenceDevice[] }> {
+  try {
+    const { stdout } = await execFileP(
+      "journalctl",
+      ["-u", "ollama", "-n", "300", "--no-pager", "-o", "cat"],
+      { timeout: 8000 },
+    );
+    return parseOllamaJournal(stdout);
+  } catch {
+    return { env: {}, devices: [] };
+  }
+}
+
+/** ollama's env from the systemd unit (Environment= + EnvironmentFiles contents). */
+async function systemdOllamaEnv(): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const unit of ["ollama", "ollama.service"]) {
+    try {
+      const { stdout } = await execFileP(
+        "systemctl",
+        ["show", unit, "-p", "Environment", "-p", "EnvironmentFiles"],
+        { timeout: 5000 },
+      );
+      const { env, envFiles } = parseSystemdShow(stdout);
+      // EnvironmentFile content first, unit Environment= overrides it.
+      for (const f of envFiles) {
+        try {
+          Object.assign(out, parseEnvFile(await readFile(f, "utf-8")));
+        } catch {
+          /* file unreadable (perm or missing) */
+        }
+      }
+      Object.assign(out, env);
+      if (Object.keys(out).length) return out;
+    } catch {
+      /* unit missing or systemctl unavailable */
+    }
   }
   return out;
 }
@@ -277,9 +605,9 @@ async function gpuEnvOf(pid: number): Promise<Record<string, string>> {
 /**
  * Which GPUs a pid actually holds, via device fds. NVIDIA: /dev/nvidiaN gives
  * the index directly. DRM: /dev/dri/cardN or renderDN (resolved via sysfs to
- * its cardN). Best-effort — empty means "unknown", not "none".
+ * its cardN). Returns DRM card numbers — callers map them to pciSlot.
  */
-async function gpuFdsOf(pid: number, renderToCard: Map<number, number>): Promise<number[]> {
+async function gpuCardsOf(pid: number, renderToCard: Map<number, number>): Promise<number[]> {
   const cards = new Set<number>();
   let fds: string[] = [];
   try {
@@ -333,80 +661,168 @@ async function renderToCardMap(): Promise<Map<number, number>> {
 
 export interface OllamaGpuPlacement {
   server_pids: number[];
-  /** GPU-selection env vars found on the `ollama serve` process(es). */
+  /** GPU/ollama env vars discovered (see env_source for where they came from). */
   env: Record<string, string>;
-  /** GPU indices parsed from the pinning env (numeric selectors only). */
+  env_source: "proc" | "systemd" | "journal" | "none";
+  env_note?: string;
+  /** Raw numeric selectors parsed from pinning env (index space varies per backend). */
   pinned_indices: number[];
-  runners: { pid: number; cmdline: string; gpu_indices: number[]; env: Record<string, string> }[];
-  /** Union of GPU indices observed in use by any ollama process. */
-  gpus_in_use: number[];
+  /** PCI slots the pinning env resolves to, where resolvable. */
+  pinned_slots: string[];
+  runners: {
+    pid: number;
+    cmdline: string;
+    gpu_cards: number[];
+    gpu_slots: string[];
+    env: Record<string, string>;
+  }[];
+  /** PCI slots observed in use by any ollama process. */
+  gpus_in_use: string[];
+  /** Devices ollama itself discovered (journal `inference compute` lines). */
+  inference_devices: InferenceDevice[];
   note?: string;
 }
 
+function envPins(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) if (GPU_ENV_VARS.includes(k)) out[k] = v;
+  return out;
+}
+
 /**
- * Best-effort parse of pinning env values into GPU indices. Handles numeric
- * lists ("0,2"), level-zero selectors ("level_zero:1"), and affinity masks;
- * skips values that aren't numeric selectors (e.g. GPU UUIDs).
+ * Resolve numeric pinning selectors to PCI slots, best-effort.
+ * GGML_VK_* → journal "vulkan" family devices (authoritative, since llama.cpp's
+ * Vulkan ordinal is what the journal enumerates). CUDA_* → "cuda" devices or
+ * the Nth nvidia GPU. HIP/ROCR → "rocm"/amd devices or Nth amd GPU.
+ * ONEAPI level_zero:N → Nth intel GPU.
  */
-export function pinnedGpuIndices(env: Record<string, string>): number[] {
-  const out = new Set<number>();
+export function resolvePinnedSlots(
+  env: Record<string, string>,
+  devices: InferenceDevice[],
+  gpus: GpuInfo[],
+): { indices: number[]; slots: string[] } {
+  const indices = new Set<number>();
+  const slots = new Set<string>();
+  const pciOf = (family: string, idx: number, vendor: string): string | undefined => {
+    const d = devices.find((x) => x.family === family && x.index === idx);
+    if (d?.pci) return normPci(d.pci);
+    const vg = gpus.filter((g) => g.vendor === vendor && g.pciSlot).sort((a, b) => a.index - b.index);
+    return vg[idx] ? normPci(vg[idx].pciSlot) : undefined;
+  };
   for (const [k, v] of Object.entries(env)) {
+    const nums: number[] = [];
     if (/VISIBLE_DEVICES|ORDINAL|AFFINITY/.test(k)) {
-      for (const part of v.split(",")) {
-        if (/^\d+$/.test(part.trim())) out.add(Number(part.trim()));
-      }
+      for (const p of v.split(",")) if (/^\d+$/.test(p.trim())) nums.push(Number(p.trim()));
     } else if (/ONEAPI_DEVICE_SELECTOR|ZE_AFFINITY/.test(k)) {
-      // "level_zero:0" or "level_zero:0,1" — take trailing digit runs.
-      for (const m of v.matchAll(/:(\d+)/g)) out.add(Number(m[1]));
-      if (/^\d+$/.test(v.trim())) out.add(Number(v.trim()));
+      for (const m of v.matchAll(/:(\d+)/g)) nums.push(Number(m[1]));
+      if (/^\d+$/.test(v.trim())) nums.push(Number(v.trim()));
+    }
+    for (const n of nums) {
+      indices.add(n);
+      const slot =
+        /VK|VULKAN/.test(k) ? pciOf("vulkan", n, "intel")
+        : /CUDA/.test(k) ? pciOf("cuda", n, "nvidia")
+        : /HIP|ROCR|ORDINAL/.test(k) ? pciOf("rocm", n, "amd")
+        : /ONEAPI|ZE_/.test(k) ? pciOf("sycl", n, "intel") ?? pciOf("level_zero", n, "intel")
+        : undefined;
+      if (slot) slots.add(slot);
     }
   }
-  return [...out].sort((a, b) => a - b);
+  return { indices: [...indices].sort((a, b) => a - b), slots: [...slots].sort() };
 }
 
 /** Where ollama is (or will be) running: env pinning + observed runner GPUs. */
 export async function ollamaGpuPlacement(gpus: GpuInfo[]): Promise<OllamaGpuPlacement> {
-  const out: OllamaGpuPlacement = { server_pids: [], env: {}, pinned_indices: [], runners: [], gpus_in_use: [] };
+  const out: OllamaGpuPlacement = {
+    server_pids: [],
+    env: {},
+    env_source: "none",
+    pinned_indices: [],
+    pinned_slots: [],
+    runners: [],
+    gpus_in_use: [],
+    inference_devices: [],
+  };
   const procs = await findOllamaProcs();
-  if (!procs.length) {
-    out.note = "no ollama processes found on this host";
-    return out;
-  }
+  const cards = await drmCards();
+  const cardToPci = new Map(cards.map((c) => [c.cardN, normPci(c.pciSlot)]));
   const renderMap = await renderToCardMap();
-  const inUse = new Set<number>();
+  const inUseSlots = new Set<string>();
+  const envNotes: string[] = [];
+
+  let serverEnvReadable = true;
   for (const p of procs) {
-    const env = await gpuEnvOf(p.pid);
-    const idx = await gpuFdsOf(p.pid, renderMap);
+    const { env, readable } = await gpuEnvOf(p.pid);
+    const fdCards = await gpuCardsOf(p.pid, renderMap);
+    const fdSlots = fdCards.map((c) => cardToPci.get(c)).filter((s): s is string => !!s);
     if (p.isServer) {
       out.server_pids.push(p.pid);
-      Object.assign(out.env, env);
+      if (readable) {
+        Object.assign(out.env, env);
+        if (Object.keys(env).length || Object.keys(out.env).length) out.env_source = "proc";
+      } else {
+        serverEnvReadable = false;
+      }
     } else {
       out.runners.push({
         pid: p.pid,
         cmdline: p.cmdline.slice(0, 200),
-        gpu_indices: idx,
+        gpu_cards: fdCards,
+        gpu_slots: fdSlots,
         env,
       });
     }
-    for (const i of idx) inUse.add(i);
+    for (const s of fdSlots) inUseSlots.add(s);
   }
-  // Fall back to the GPU tool's process list when /proc fd scan found nothing
-  // (e.g. nvtop attributes a runner to a device we can't see in /proc).
-  if (!inUse.size) {
+
+  // Fallback env discovery: systemd unit (env + EnvironmentFiles), then journal.
+  if (!serverEnvReadable && out.server_pids.length) {
+    envNotes.push("cross-user /proc/<pid>/environ denied — reading env from systemd/journal instead");
+  }
+  if (out.env_source === "none") {
+    const sd = await systemdOllamaEnv();
+    const pins = envPins(sd);
+    if (Object.keys(pins).length || Object.keys(sd).length) {
+      out.env = { ...sd, ...out.env };
+      out.env_source = "systemd";
+    }
+  }
+  const journal = await ollamaJournal();
+  out.inference_devices = journal.devices;
+  if (out.env_source === "none" && Object.keys(journal.env).length) {
+    out.env = journal.env;
+    out.env_source = "journal";
+  } else if (Object.keys(journal.env).length) {
+    // Journal's map[] is the server's full effective env — fill any gaps.
+    for (const [k, v] of Object.entries(journal.env)) out.env[k] ??= v;
+  }
+  if (envNotes.length) out.env_note = envNotes.join("; ");
+
+  // Observed usage: runner fds first, then the GPU tool's process list.
+  if (!inUseSlots.size) {
     for (const g of gpus) {
       for (const proc of g.processes ?? []) {
-        if (OLLAMA_PROC_RE.test(proc.cmdline)) inUse.add(g.index);
+        if (OLLAMA_PROC_RE.test(proc.cmdline) && g.pciSlot) inUseSlots.add(normPci(g.pciSlot));
       }
     }
   }
-  out.gpus_in_use = [...inUse].sort((a, b) => a - b);
-  out.pinned_indices = pinnedGpuIndices(out.env);
-  if (!Object.keys(out.env).length && !out.gpus_in_use.length) {
+  out.gpus_in_use = [...inUseSlots].sort();
+
+  const pins = envPins(out.env);
+  const resolved = resolvePinnedSlots(pins, out.inference_devices, gpus);
+  out.pinned_indices = resolved.indices;
+  out.pinned_slots = resolved.slots;
+
+  if (!Object.keys(pins).length && !out.gpus_in_use.length) {
     out.note =
-      "no GPU pinning env on the ollama server and no runner observed on a specific GPU " +
-      "(idle servers hold no GPU). Ollama will auto-select; pin it with CUDA_VISIBLE_DEVICES " +
-      "(NVIDIA), HIP_VISIBLE_DEVICES/ROCR_VISIBLE_DEVICES (AMD), or ONEAPI_DEVICE_SELECTOR " +
-      "e.g. level_zero:0 (Intel) on the `ollama serve` process.";
+      "no GPU pinning env found for ollama and no runner observed on a specific GPU " +
+      "(idle servers hold no GPU). Ollama will auto-select; pin it with the backend-appropriate " +
+      "var on `ollama serve`: CUDA_VISIBLE_DEVICES (NVIDIA), HIP_VISIBLE_DEVICES/" +
+      "ROCR_VISIBLE_DEVICES (AMD), ONEAPI_DEVICE_SELECTOR=level_zero:N (Intel SYCL), or " +
+      "GGML_VK_VISIBLE_DEVICES=N (Vulkan).";
+  }
+  if (!procs.length) {
+    out.note = out.note ? `no ollama processes found. ${out.note}` : "no ollama processes found on this host";
   }
   return out;
 }

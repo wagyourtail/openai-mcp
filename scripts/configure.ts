@@ -8,13 +8,15 @@
  */
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout, argv } from "node:process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(here, "..", "src", "index.ts");
+const projectRoot = join(here, "..");
+const serverPath = join(projectRoot, "src", "index.ts");
 const args = argv.slice(2);
 const YES = args.includes("--yes");
 const PRINT_ONLY = args.includes("--print-devin");
@@ -109,6 +111,17 @@ async function main(): Promise<void> {
   };
 
   console.log("openai-mcp config builder\n");
+
+  // --- deps: the server crashes at spawn with ERR_MODULE_NOT_FOUND without them ---
+  if (!existsSync(join(projectRoot, "node_modules", "@modelcontextprotocol"))) {
+    console.log("node_modules missing — the MCP server can't start without it.");
+    const doInstall = YES || (await askBool(`Run npm install in ${projectRoot}?`, true));
+    if (doInstall) {
+      execFileSync("npm", ["install"], { cwd: projectRoot, stdio: "inherit" });
+    } else {
+      console.log("  Skipped — run `npm install` yourself before registering the server.");
+    }
+  }
 
   // --- update mode: prefill from existing config ---
   const existing = existsSync(outPath) ? readJson<ExistingConfig>(outPath, {}) : {};

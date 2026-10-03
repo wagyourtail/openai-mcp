@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import type { ServerContext } from "../context.ts";
 import { jsonResult } from "./helpers.ts";
 import { controlJob, createJob, finishJob, getJob, listJobs, updateJob, type JobAction } from "../lib/jobs.ts";
-import { ollamaGpuPlacement, systemResources, type OllamaGpuPlacement } from "../lib/sysinfo.ts";
+import { normPci, ollamaGpuPlacement, systemResources, type GpuInfo, type OllamaGpuPlacement } from "../lib/sysinfo.ts";
 import { pruneCandidates, rankModels } from "../lib/modelpick.ts";
 import { patchProvider } from "../config.ts";
 import { getStats } from "../lib/usage.ts";
@@ -77,9 +77,21 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
       const res = await systemResources();
       const loaded = p.ps ? await p.ps() : [];
       const placement = await ollamaGpuPlacement(res.gpus);
+      fillInferenceMem(res.gpus, placement);
       return jsonResult({ provider: p.name, ...res, loaded_models: loaded, ollama_gpu: placement });
     },
   );
+
+  /** Fill missing GPU memory from ollama's own discovery (journal `inference compute` lines). */
+  function fillInferenceMem(gpus: GpuInfo[], placement: OllamaGpuPlacement): void {
+    for (const g of gpus) {
+      if (!g.pciSlot || (g.freeMB !== undefined && g.totalMB !== undefined)) continue;
+      const d = placement.inference_devices.find((x) => x.pci && normPci(x.pci) === normPci(g.pciSlot));
+      if (!d) continue;
+      g.totalMB ??= d.totalMB || undefined;
+      g.freeMB ??= d.availMB || undefined;
+    }
+  }
 
   server.registerTool(
     "pull_model",
@@ -228,40 +240,64 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         const res = await systemResources();
         const pl = await ollamaGpuPlacement(res.gpus);
         placement = pl;
-        // Target priority: GPUs observed in use > GPUs pinned via server env >
-        // discrete GPUs (ollama auto-selects) > everything (iGPU-only host).
+        fillInferenceMem(res.gpus, pl);
+        // GPU identity is PCI slot. Target priority: GPUs observed in use >
+        // GPUs pinned via server env > discrete GPUs (auto-select) > everything.
+        const slots = pl.gpus_in_use.length ? pl.gpus_in_use : pl.pinned_slots;
         const discrete = res.gpus.filter((g) => !g.integrated);
-        const targets = pl.gpus_in_use.length
-          ? res.gpus.filter((g) => pl.gpus_in_use.includes(g.index))
-          : pl.pinned_indices.length
-            ? res.gpus.filter((g) => pl.pinned_indices.includes(g.index))
-            : (discrete.length ? discrete : res.gpus);
-        const freeMB = Math.max(0, ...targets.map((g) => g.freeMB ?? 0));
+        const targets = slots.length
+          ? res.gpus.filter((g) => g.pciSlot && slots.includes(normPci(g.pciSlot)))
+          : (discrete.length ? discrete : res.gpus);
+        let freeMB = Math.max(0, ...targets.map((g) => g.freeMB ?? 0));
         if (freeMB > 0) {
           budgetBytes = freeMB * 1024 * 1024;
           budgetSource =
             pl.gpus_in_use.length > 0
               ? `free VRAM on GPU(s) in use by ollama: ${pl.gpus_in_use.join(",")}`
-              : pl.pinned_indices.length > 0
-                ? `free VRAM on pinned GPU(s): ${pl.pinned_indices.join(",")} (from server env)`
+              : pl.pinned_slots.length > 0
+                ? `free VRAM on pinned GPU(s): ${pl.pinned_slots.join(",")} (server env: ${Object.entries(pl.env).filter(([k]) => /VISIBLE|SELECTOR|AFFINITY|PRIME|ICD/.test(k)).map(([k, v]) => `${k}=${v}`).join(" ") || "unknown"})`
                 : "largest free VRAM across discrete GPUs (ollama auto-selects)";
-        } else if (res.ram.freeMB > 0) {
+        } else if (slots.length && targets.length) {
+          // Pinned/observed GPU but its free VRAM is unknown — do NOT fall back
+          // to some other GPU's roomier memory; ollama can't use it. Use the
+          // pinned device's journal `available`, else its total, else RAM.
+          const jAvail = Math.max(
+            0,
+            ...targets.map(
+              (g) =>
+                pl.inference_devices.find((d) => d.pci && normPci(d.pci) === normPci(g.pciSlot))?.availMB ?? 0,
+            ),
+          );
+          const tTotal = Math.max(0, ...targets.map((g) => g.totalMB ?? 0));
+          if (jAvail > 0) {
+            budgetBytes = jAvail * 1024 * 1024;
+            budgetSource = `pinned GPU ${slots.join(",")} free VRAM from ollama journal (nvtop/sysfs couldn't measure it)`;
+          } else if (tTotal > 0) {
+            budgetBytes = tTotal * 1024 * 1024;
+            budgetSource = `pinned GPU ${slots.join(",")} TOTAL VRAM (free unknown — may overestimate)`;
+          }
+        }
+        if (!budgetBytes && res.ram.freeMB > 0) {
           budgetBytes = res.ram.freeMB * 1024 * 1024;
-          budgetSource = "free RAM (no GPU detected — CPU inference)";
+          budgetSource = slots.length
+            ? `free RAM fallback (pinned GPU ${slots.join(",")} had no measurable VRAM)`
+            : "free RAM (no GPU detected — CPU inference)";
         }
       }
       const ranked = rankModels(models, budgetBytes);
-      const best = ranked[0];
+      const best = ranked.find((r) => r.fits) ?? null;
       const result: Record<string, unknown> = {
         provider: p.name,
-        recommended: best?.id,
+        recommended: best?.id ?? null,
         current_default: p.defaultModel ?? ctx.config.default_model,
         budget_mb: budgetBytes ? Math.round(budgetBytes / 1024 / 1024) : undefined,
         budget_source: budgetSource,
+        ...(best ? {} : { warning: "no installed model fits the detected memory budget — pull a smaller model or free VRAM" }),
         ...(placement ? { ollama_gpu: placement } : {}),
         ranked: ranked.map((r) => ({
           id: r.id,
           size_gb: r.sizeBytes ? Math.round(r.sizeBytes / 1e9 * 10) / 10 : undefined,
+          fits: r.fits,
           modified_at: r.modifiedAt,
           reason: r.reason,
         })),

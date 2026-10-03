@@ -29,10 +29,11 @@ free-tier version of Devin's cloud subagents.
 ### 1. Server config
 
 ```bash
-npm run configure     # interactive wizard: probes ollama, writes ~/.config/openai-mcp/config.json,
-                      # prefills from an existing config (update mode), then offers to install the
-                      # server into ~/.config/devin/mcp_config.json AND merge recommended
-                      # permissions into ~/.config/devin/config.json (backs both up first)
+npm run configure     # interactive wizard: runs `npm install` if node_modules is missing, probes
+                      # ollama, writes ~/.config/openai-mcp/config.json, prefills from an existing
+                      # config (update mode), then offers to install the server into
+                      # ~/.config/devin/mcp_config.json AND merge recommended permissions into
+                      # ~/.config/devin/config.json (backs both up first)
 # or: cp config.example.json ~/.config/openai-mcp/config.json  (edit by hand)
 ```
 
@@ -190,14 +191,32 @@ Two types:
 ### Multi-GPU hosts
 
 GPU detection prefers `nvtop -s` (all vendors + per-process usage), falling back to
-`nvidia-smi`/`rocm-smi`. `get_system_resources` reports each GPU's vendor/PCI slot/free VRAM plus
-an `ollama_gpu` block: the `ollama serve` process's pinning env vars (`CUDA_VISIBLE_DEVICES`,
-`HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`, …) and which GPU device
-fds any runner processes hold. To pin ollama to a specific card — e.g. an Intel Arc A380 while a
-P100 stays reserved for a vLLM server — set the selector on the `ollama serve` process
-(`ONEAPI_DEVICE_SELECTOR=level_zero:0` for Intel, `CUDA_VISIBLE_DEVICES=N` for NVIDIA), restart
-ollama, then `get_system_resources` shows the pin and `recommend_model` sizes its memory budget
-against *that* GPU instead of the roomiest one.
+`nvidia-smi`/`rocm-smi`. **GPUs are identified by PCI bus id** — tool enumeration order is not
+trusted (nvtop order ≠ DRM cardN ≠ lspci order on multi-vendor hosts). Each GPU is bound to its
+`/sys/class/drm/cardN` entry via PCI match or device-name matching, so `pciSlot`/`driver` are always
+correct; missing VRAM is filled from sysfs `mem_info_vram_*` (i915/xe/amdgpu) or ollama's own
+discovery log.
+
+`get_system_resources` returns an `ollama_gpu` block describing where the server runs:
+
+- `env` + `env_source` — GPU pinning vars discovered from the `ollama serve` process env
+  (`env_source: "proc"`), falling back to the systemd unit (`Environment=`/`EnvironmentFile`,
+  `"systemd"`) or the journal's `server config env=map[...]` line (`"journal"`). Cross-user
+  `/proc` denial is reported in `env_note` rather than silently yielding an empty env.
+- `pinned_indices`/`pinned_slots` — numeric selectors resolved to PCI slots through the journal's
+  `inference compute` device table (e.g. `GGML_VK_VISIBLE_DEVICES=2` → the Vulkan device whose
+  `pci_id` matches index 2).
+- `runners`/`gpus_in_use` — loaded runner processes attributed to GPUs via `/proc/<pid>/fd`
+  device nodes, keyed on PCI slot.
+- `inference_devices` — devices ollama discovered (`name`, `pci_id`, `total`/`available` VRAM) —
+  authoritative for backends nvtop can't measure (e.g. Intel Arc via Vulkan).
+
+To pin ollama to a specific card — e.g. an A380 while a P100 stays reserved for a vLLM server —
+set the backend-appropriate selector on `ollama serve` (`GGML_VK_VISIBLE_DEVICES=N` for llama.cpp
+Vulkan/Intel Arc, `CUDA_VISIBLE_DEVICES=N` NVIDIA, `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES`
+AMD, `ONEAPI_DEVICE_SELECTOR=level_zero:N` Intel SYCL) in its unit's `EnvironmentFile`, restart
+ollama, then `get_system_resources` shows the pin and `recommend_model` sizes its budget against
+*that* GPU — never a roomier GPU ollama can't use.
 
 Quick single-provider env mode (no config file): `LOCAL_LLM_BASE_URL`, `LOCAL_LLM_API_KEY_ENV`,
 `LOCAL_LLM_MODEL`, `LOCAL_LLM_PROVIDER_TYPE`.
