@@ -145,7 +145,15 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
       const families = new Set(installed.map((id) => id.split(":")[0]));
       return jsonResult({
         registry: "ollama.com",
-        results: hits.map((h) => ({ ...h, installed: families.has(h.name) })),
+        results: hits.map((h) => ({
+          name: h.name,
+          description: h.description,
+          ...(h.capabilities.length ? { capabilities: h.capabilities } : {}),
+          ...(h.sizes.length ? { sizes: h.sizes } : {}),
+          ...(h.pulls ? { pulls: h.pulls } : {}),
+          ...(h.updated ? { updated: h.updated } : {}),
+          installed: families.has(h.name),
+        })),
         note: "Pull a match with pull_model {model: '<name>:<tag>'} — see list_model_tags for available tags.",
       });
     },
@@ -303,6 +311,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
 
       let budgetBytes = budget_mb ? budget_mb * 1024 * 1024 : 0;
       let budgetSource = budget_mb ? "caller override" : "none detected";
+      const warnings: string[] = [];
       let placement: OllamaGpuPlacement | undefined;
       if (!budgetBytes && p.isLocal && p.type === "ollama") {
         const res = await systemResources();
@@ -312,10 +321,15 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         // GPU identity is PCI slot. Target priority: GPUs observed in use >
         // GPUs pinned via server env > discrete GPUs (auto-select) > everything.
         const slots = pl.gpus_in_use.length ? pl.gpus_in_use : pl.pinned_slots;
+        const pinPresent = pl.pinned_indices.length > 0;
         const discrete = res.gpus.filter((g) => !g.integrated);
+        // A pin that can't be resolved must NOT fall back to auto-select —
+        // sizing against a GPU ollama can't see is the original bug.
         const targets = slots.length
           ? res.gpus.filter((g) => g.pciSlot && slots.includes(normPci(g.pciSlot)))
-          : (discrete.length ? discrete : res.gpus);
+          : pinPresent
+            ? []
+            : (discrete.length ? discrete : res.gpus);
         let freeMB = Math.max(0, ...targets.map((g) => g.freeMB ?? 0));
         if (freeMB > 0) {
           budgetBytes = freeMB * 1024 * 1024;
@@ -325,42 +339,48 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
               : pl.pinned_slots.length > 0
                 ? `free VRAM on pinned GPU(s): ${pl.pinned_slots.join(",")} (server env: ${Object.entries(pl.env).filter(([k]) => /VISIBLE|SELECTOR|AFFINITY|PRIME|ICD/.test(k)).map(([k, v]) => `${k}=${v}`).join(" ") || "unknown"})`
                 : "largest free VRAM across discrete GPUs (ollama auto-selects)";
-        } else if (slots.length && targets.length) {
-          // Pinned/observed GPU but its free VRAM is unknown — do NOT fall back
-          // to some other GPU's roomier memory; ollama can't use it. Use the
-          // pinned device's journal `available`, else its total, else RAM.
-          const jAvail = Math.max(
-            0,
-            ...targets.map(
-              (g) =>
-                pl.inference_devices.find((d) => d.pci && normPci(d.pci) === normPci(g.pciSlot))?.availMB ?? 0,
-            ),
-          );
-          const tTotal = Math.max(0, ...targets.map((g) => g.totalMB ?? 0));
+        } else if (slots.length || pinPresent) {
+          // Pinned/observed but direct measurement failed — use ollama's own
+          // discovery. Under an active pin, journal inference_devices ARE the
+          // survivors, so they're usable even when the pin couldn't be mapped
+          // back to a pciSlot.
+          const devs = slots.length
+            ? pl.inference_devices.filter((d) => d.pci && slots.includes(normPci(d.pci)))
+            : pl.inference_devices;
+          const jAvail = Math.max(0, ...devs.map((d) => d.availMB));
+          const tTotal = Math.max(0, ...targets.map((g) => g.totalMB ?? 0), ...devs.map((d) => d.totalMB));
+          const pinned = slots.length ? `pinned GPU ${slots.join(",")}` : `pinned GPU (env selector, pci unresolved)`;
           if (jAvail > 0) {
             budgetBytes = jAvail * 1024 * 1024;
-            budgetSource = `pinned GPU ${slots.join(",")} free VRAM from ollama journal (nvtop/sysfs couldn't measure it)`;
+            budgetSource = `${pinned} free VRAM from ollama journal (nvtop/sysfs couldn't measure it)`;
           } else if (tTotal > 0) {
             budgetBytes = tTotal * 1024 * 1024;
-            budgetSource = `pinned GPU ${slots.join(",")} TOTAL VRAM (free unknown — may overestimate)`;
+            budgetSource = `${pinned} TOTAL VRAM (free unknown — may overestimate)`;
+          } else {
+            budgetSource = "pin env present but no device memory could be measured";
+            warnings.push(
+              `ollama pin env (${Object.keys(pl.env).filter((k) => /VISIBLE|SELECTOR|AFFINITY|PRIME|ICD/.test(k)).join(",") || "?"}) ` +
+              `is set but couldn't be resolved to a GPU or journal device — verify GGML_VK_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES indexing on this host`,
+            );
           }
         }
         if (!budgetBytes && res.ram.freeMB > 0) {
           budgetBytes = res.ram.freeMB * 1024 * 1024;
-          budgetSource = slots.length
-            ? `free RAM fallback (pinned GPU ${slots.join(",")} had no measurable VRAM)`
+          budgetSource = pinPresent || slots.length
+            ? `free RAM fallback (${budgetSource})`
             : "free RAM (no GPU detected — CPU inference)";
         }
       }
       const ranked = rankModels(models, budgetBytes);
       const best = ranked.find((r) => r.fits) ?? null;
+      if (!best) warnings.push("no installed model fits the detected memory budget — pull a smaller model or free VRAM");
       const result: Record<string, unknown> = {
         provider: p.name,
         recommended: best?.id ?? null,
         current_default: p.defaultModel ?? ctx.config.default_model,
         budget_mb: budgetBytes ? Math.round(budgetBytes / 1024 / 1024) : undefined,
         budget_source: budgetSource,
-        ...(best ? {} : { warning: "no installed model fits the detected memory budget — pull a smaller model or free VRAM" }),
+        ...(warnings.length ? { warning: warnings.join("; ") } : {}),
         ...(placement ? { ollama_gpu: placement } : {}),
         ranked: ranked.map((r) => ({
           id: r.id,

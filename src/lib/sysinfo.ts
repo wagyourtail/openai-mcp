@@ -207,7 +207,7 @@ export function assignCards(gpus: GpuInfo[], cards: DrmCard[]): void {
   }
 }
 
-async function sysfsVramMB(cardN: number): Promise<{ totalMB?: number; usedMB?: number }> {
+async function sysfsVramMB(cardN: number): Promise<{ totalMB?: number; usedMB?: number; freeMB?: number }> {
   const read = async (f: string): Promise<number | undefined> => {
     try {
       const v = parseInt(await readFile(`/sys/class/drm/card${cardN}/device/${f}`, "utf-8"), 10);
@@ -216,9 +216,11 @@ async function sysfsVramMB(cardN: number): Promise<{ totalMB?: number; usedMB?: 
       return undefined;
     }
   };
-  const totalMB = await read("mem_info_vram_total");
+  // amdgpu + xe expose mem_info_vram_*; i915 dGPUs (DG2/Arc) expose lmem_*.
+  const totalMB = (await read("mem_info_vram_total")) ?? (await read("lmem_total_bytes"));
   const usedMB = await read("mem_info_vram_used");
-  return { totalMB, usedMB };
+  const freeMB = await read("lmem_avail_bytes");
+  return { totalMB, usedMB, freeMB };
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +396,7 @@ export async function systemResources(): Promise<SystemResources> {
       const v = await sysfsVramMB(g.cardN);
       g.totalMB ??= v.totalMB;
       g.usedMB ??= v.usedMB;
+      g.freeMB ??= v.freeMB;
       if (g.freeMB === undefined && g.totalMB !== undefined && g.usedMB !== undefined) {
         g.freeMB = g.totalMB - g.usedMB;
       }
@@ -520,7 +523,10 @@ export function parseSystemdShow(text: string): { env: Record<string, string>; e
 }
 
 export interface InferenceDevice {
+  /** Selector ordinal VISIBLE_DEVICES-style env vars index into (filter_id when logged). */
   index: number;
+  /** Post-filter log id (informational only — NOT the selector ordinal). */
+  id?: number;
   family: string;
   name: string;
   pci: string;
@@ -528,13 +534,27 @@ export interface InferenceDevice {
   availMB: number;
 }
 
-/** Parse ollama journal: `env=map[...]` plus `inference compute` device lines. */
+/**
+ * Parse ollama journal: `env=map[...]` plus `inference compute` device lines.
+ * Journal may span multiple boots — env vars come from the LAST env=map line
+ * (the current boot's full map), and device lines that precede it belong to
+ * older boots and are dropped (devices after it are the current survivors,
+ * which under a visible-devices pin is exactly the pinned set).
+ * Device index prefers `filter_id=` (the pre-filter backend ordinal that
+ * GGML_VK_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES select), then the trailing
+ * digits of `name=VulkanN`/`cudaN`, then the `id=` field — the latter two
+ * renumber per boot under a pin, so they're last resort.
+ */
 export function parseOllamaJournal(text: string): { env: Record<string, string>; devices: InferenceDevice[] } {
-  const env: Record<string, string> = {};
-  const devices: InferenceDevice[] = [];
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  let lastEnvIdx = -1;
+  let env: Record<string, string> = {};
+  const parsed: { lineIdx: number; dev: InferenceDevice }[] = [];
+  for (const [lineIdx, line] of lines.entries()) {
     const envMatch = line.match(/env=map\[([^\]]+)\]/);
     if (envMatch) {
+      lastEnvIdx = lineIdx;
+      env = {};
       for (const entry of envMatch[1].split(/\s+/).filter(Boolean)) {
         const i = entry.indexOf(":");
         if (i > 0) env[entry.slice(0, i)] = entry.slice(i + 1);
@@ -547,26 +567,71 @@ export function parseOllamaJournal(text: string): { env: Record<string, string>;
     const pciM = line.match(/\bpci_id=(\S+)/);
     const totalM = line.match(/\btotal="?([\d.]+)\s*(GiB|MiB|GB|MB|KiB|KB)"?/i);
     const availM = line.match(/\bavailable="?([\d.]+)\s*(GiB|MiB|GB|MB|KiB|KB)"?/i);
+    const filterM = line.match(/\bfilter_id=(\d+)/);
+    const idM = line.match(/\bid=(\d+)/);
     const nameTok = nameM?.[1] ?? "";
     const idxM = nameTok.match(/(\d+)$/);
-    devices.push({
-      index: idxM ? Number(idxM[1]) : 0,
-      family: (idxM ? nameTok.slice(0, nameTok.length - idxM[1].length) : nameTok).toLowerCase(),
-      name: descM?.[1] ?? nameTok,
-      pci: pciM?.[1] ?? "",
-      totalMB: totalM ? (parseSizeMB(totalM[1], totalM[2]) ?? 0) : 0,
-      availMB: availM ? (parseSizeMB(availM[1], availM[2]) ?? 0) : 0,
+    const index = filterM ? Number(filterM[1]) : idxM ? Number(idxM[1]) : idM ? Number(idM[1]) : 0;
+    parsed.push({
+      lineIdx,
+      dev: {
+        index,
+        id: idM ? Number(idM[1]) : undefined,
+        family: (idxM ? nameTok.slice(0, nameTok.length - idxM[1].length) : nameTok).toLowerCase(),
+        name: descM?.[1] ?? nameTok,
+        pci: pciM?.[1] ?? "",
+        totalMB: totalM ? (parseSizeMB(totalM[1], totalM[2]) ?? 0) : 0,
+        availMB: availM ? (parseSizeMB(availM[1], availM[2]) ?? 0) : 0,
+      },
     });
   }
-  return { env, devices };
+  // Prefer current-boot devices (after the last env=map). If that leaves none —
+  // e.g. a boot that logged devices but no env map — fall back to all of them.
+  const pool = lastEnvIdx >= 0 ? parsed.filter((p) => p.lineIdx > lastEnvIdx) : parsed;
+  const candidates = pool.length ? pool : parsed;
+  const byKey = new Map<string, InferenceDevice>();
+  for (const { dev } of candidates) {
+    byKey.set(dev.pci ? `pci:${normPci(dev.pci)}` : `${dev.family}:${dev.index}`, dev); // last wins
+  }
+  return { env, devices: [...byKey.values()] };
+}
+
+/** ActiveEnterTimestamp of the ollama unit — confines journal queries to the current boot. */
+async function ollamaActiveSince(): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileP(
+      "systemctl",
+      ["show", "ollama", "-p", "ActiveEnterTimestamp"],
+      { timeout: 5000 },
+    );
+    const ts = stdout.trim().split("=")[1]?.trim();
+    return ts || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function ollamaJournal(): Promise<{ env: Record<string, string>; devices: InferenceDevice[] }> {
+  const since = await ollamaActiveSince();
+  const sinceArgs = since ? ["--since", since] : [];
+  try {
+    // Pattern query, not recency: startup lines (env map, device discovery) age
+    // out of any -n window on a long-running server.
+    const { stdout } = await execFileP(
+      "journalctl",
+      ["-u", "ollama", "--no-pager", "-o", "cat", ...sinceArgs, "-g", "inference compute|env=map"],
+      { timeout: 8000, maxBuffer: 8 * 1024 * 1024 },
+    );
+    const parsed = parseOllamaJournal(stdout);
+    if (Object.keys(parsed.env).length || parsed.devices.length) return parsed;
+  } catch {
+    /* -g unsupported (old systemd) or journalctl unavailable — fall through */
+  }
   try {
     const { stdout } = await execFileP(
       "journalctl",
-      ["-u", "ollama", "-n", "300", "--no-pager", "-o", "cat"],
-      { timeout: 8000 },
+      ["-u", "ollama", "-n", "5000", "--no-pager", "-o", "cat", ...sinceArgs],
+      { timeout: 8000, maxBuffer: 8 * 1024 * 1024 },
     );
     return parseOllamaJournal(stdout);
   } catch {

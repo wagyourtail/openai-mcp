@@ -100,6 +100,43 @@ test("parseEnvFile handles comments, quotes, and equals-in-value", () => {
   assert.equal(env.WITH_EQUALS, "k=v=w"); // split at first '=' only
 });
 
+test("parseOllamaJournal prefers filter_id over name/id ordinals", () => {
+  // Under GGML_VK_VISIBLE_DEVICES=2 the survivor logs id=0 name=Vulkan0 but
+  // filter_id=2 — the pre-filter ordinal the env var actually indexes.
+  const log = `env=map[GGML_VK_VISIBLE_DEVICES:2 OLLAMA_VULKAN:true]
+level=INFO msg="inference compute" id=0 library=vulkan filter_id=2 name=Vulkan0 description="Intel(R) Arc(tm) A380 Graphics (DG2)" pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`;
+  const { devices } = parseOllamaJournal(log);
+  assert.equal(devices.length, 1);
+  assert.equal(devices[0].index, 2); // filter_id, not name suffix or id
+  assert.equal(devices[0].id, 0);
+});
+
+test("parseOllamaJournal scopes devices/env to the last boot", () => {
+  const log = [
+    // boot 1: unpinned, all three devices discovered
+    `env=map[OLLAMA_VULKAN:true OLLAMA_HOST:0.0.0.0:11434]`,
+    `inference compute id=0 library=vulkan filter_id=0 name=Vulkan0 description="HD 630" pci_id=0000:00:02.0 total="8.0 GiB" available="7.0 GiB"`,
+    `inference compute id=1 library=vulkan filter_id=1 name=Vulkan1 description="Tesla P100" pci_id=0000:01:00.0 total="16.0 GiB" available="15.0 GiB"`,
+    `inference compute id=2 library=vulkan filter_id=2 name=Vulkan2 description="Arc A380" pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`,
+    // boot 2: pinned to A380 — new env map + only the survivor
+    `env=map[GGML_VK_VISIBLE_DEVICES:2 OLLAMA_VULKAN:true]`,
+    `inference compute id=0 library=vulkan filter_id=2 name=Vulkan0 description="Arc A380" pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`,
+  ].join("\n");
+  const { env, devices } = parseOllamaJournal(log);
+  assert.equal(env.GGML_VK_VISIBLE_DEVICES, "2"); // last boot's map wins
+  assert.equal(env.OLLAMA_HOST, undefined); // stale-boot key dropped
+  assert.equal(devices.length, 1);
+  assert.equal(devices[0].pci, "0000:04:00.0");
+});
+
+test("filter_id lets pinned env resolve to the survivor's pci", () => {
+  const log = `env=map[GGML_VK_VISIBLE_DEVICES:2]
+inference compute id=0 library=vulkan filter_id=2 name=Vulkan0 description="Arc A380" pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`;
+  const { env, devices } = parseOllamaJournal(log);
+  const r = resolvePinnedSlots(env, devices, []);
+  assert.deepEqual(r.slots, ["04:00.0"]);
+});
+
 test("resolvePinnedSlots maps GGML_VK index through journal vulkan devices", () => {
   const devices: InferenceDevice[] = [
     { index: 0, family: "vulkan", name: "HD 630", pci: "0000:00:02.0", totalMB: 0, availMB: 0 },

@@ -32,12 +32,14 @@ export const defaultFetcher: Fetcher = async (url, headers = {}) => {
 
 const htmlUnescape = (s: string): string =>
   s
-    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&nbsp;/g, " ")
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&#x2F;/g, "/");
+    .replace(/\s{2,}/g, " ");
 
 const stripTags = (s: string): string => htmlUnescape(s.replace(/<[^>]+>/g, "").trim());
 
@@ -76,10 +78,29 @@ export async function searchRegistry(
   opts: { category?: string; limit?: number; fetcher?: Fetcher } = {},
 ): Promise<RegistrySearchHit[]> {
   const f = opts.fetcher ?? defaultFetcher;
-  const url =
-    `https://ollama.com/search?q=${encodeURIComponent(query)}` +
-    (opts.category ? `&c=${encodeURIComponent(opts.category)}` : "");
-  return parseSearchHtml(await f(url), opts.limit ?? 12);
+  const limit = opts.limit ?? 12;
+  const search = (q: string, category?: string) =>
+    f(
+      `https://ollama.com/search?q=${encodeURIComponent(q)}` +
+        (category ? `&c=${encodeURIComponent(category)}` : ""),
+    ).then((html) => parseSearchHtml(html, limit));
+
+  // ollama.com's search is literal — a multi-word query + category filter can
+  // miss obvious families ("qwen small" misses qwen3.5). Fallback passes trade
+  // a couple extra requests for recall: unfiltered query, then single terms.
+  const hits = new Map<string, RegistrySearchHit>();
+  const add = (batch: RegistrySearchHit[]): void => {
+    for (const h of batch) if (!hits.has(h.name)) hits.set(h.name, h);
+  };
+  add(await search(query, opts.category));
+  if (hits.size < limit && opts.category) add(await search(query));
+  if (hits.size < limit) {
+    for (const word of query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 2)) {
+      if (hits.size >= limit) break;
+      add(await search(word, opts.category));
+    }
+  }
+  return [...hits.values()].slice(0, limit);
 }
 
 // ollama.com/library/<name>/tags — tags appear as "name:tag" link text.
