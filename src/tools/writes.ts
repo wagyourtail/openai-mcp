@@ -5,6 +5,7 @@ import { pickModel } from "../context.ts";
 import { GEN_PARAMS, jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite, uncommitOp } from "../lib/staging.ts";
 import { applyEdits, parseEditBlocks, type ApplyResult } from "../lib/edits.ts";
+import { verifyStagedOp } from "../lib/verify.ts";
 import { patchConfig } from "../config.ts";
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
@@ -241,6 +242,46 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         commit_id: r.commitId,
         drifted: r.drifted,
         note: "Undo available via revert_write(commit_id) — creates a staged revert op.",
+      });
+    },
+  );
+
+  server.registerTool(
+    "verify_staged",
+    {
+      description:
+        "Run a whitelisted command against a staged write WITHOUT touching the target file: the op's " +
+        "content is materialized to a temp file in the same directory (import/path resolution matches " +
+        "the real file), '{file}' in argv is replaced by the temp path (appended if absent), and the " +
+        "command runs under the command_whitelist. Use it to typecheck/lint a staged op before " +
+        "commit_write — running a checker on the original path sees the OLD on-disk content, not the " +
+        "stage. restore_paths lists files the command may rewrite (e.g. an auto-updated lint baseline) " +
+        "— snapshotted before, restored after. The temp file is always removed.",
+      inputSchema: {
+        op_id: z.string(),
+        argv: z.array(z.string()).describe("Whitelisted command argv; '{file}' is replaced by the materialized temp path"),
+        cwd: z.string().optional().describe("Working directory (must be inside allowed roots); defaults to the file's directory"),
+        restore_paths: z.array(z.string()).optional().describe("Files to snapshot and restore after the run (e.g. auto-rewritten baseline files)"),
+        timeout_s: z.number().int().positive().optional().describe("Command timeout override (default: run_command_timeout_s config)"),
+      },
+    },
+    async ({ op_id, argv, cwd, restore_paths, timeout_s }) => {
+      const r = await verifyStagedOp(ctx.guard, ctx.config.command_whitelist, {
+        opId: op_id,
+        argv,
+        cwd,
+        restorePaths: restore_paths,
+        timeoutMs: (timeout_s ?? ctx.config.limits.run_command_timeout_s) * 1000,
+        maxOutputChars: ctx.config.limits.run_command_output_chars,
+      });
+      return jsonResult({
+        ok: r.ok,
+        exit_code: r.code,
+        timed_out: r.timedOut,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        restored: r.restored,
+        note: "Checked the STAGED content via a temp file — the real path was never modified.",
       });
     },
   );

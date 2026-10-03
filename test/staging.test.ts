@@ -78,6 +78,31 @@ test("commit stores an optional summary on the commit record", async () => {
   assert.equal(rec?.summary, "rewrite a.txt");
 });
 
+test("staged content gets a POSIX trailing newline", async () => {
+  const { root, guard } = setup();
+  const op = stageWrite(guard, { path: join(root, "a.txt"), content: "no newline at end" }, 60_000);
+  assert.equal(op.newContent, "no newline at end\n");
+  await commitOp(guard, op.id);
+  assert.equal(readFileSync(join(root, "a.txt"), "utf-8"), "no newline at end\n");
+});
+
+test("empty staged content stays empty (not newline-only)", async () => {
+  const { root, guard } = setup();
+  const op = stageWrite(guard, { path: join(root, "a.txt"), content: "" }, 60_000);
+  assert.equal(op.newContent, "");
+});
+
+test("revert restores byte-exact content without newline normalization", async () => {
+  const { root, guard } = setup();
+  writeFileSync(join(root, "nonl.txt"), "original-no-newline");
+  const op = stageWrite(guard, { path: join(root, "nonl.txt"), content: "changed\n" }, 60_000);
+  const { commitId } = await commitOp(guard, op.id);
+  const revert = revertCommit(guard, commitId, 60_000);
+  assert.equal(revert.newContent, "original-no-newline");
+  await commitOp(guard, revert.id);
+  assert.equal(readFileSync(join(root, "nonl.txt"), "utf-8"), "original-no-newline");
+});
+
 test("uncommit restores a modified file in one call and is itself revertible", async () => {
   const { root, guard } = setup();
   const op = stageWrite(guard, { path: join(root, "a.txt"), content: "v2\n" }, 60_000);

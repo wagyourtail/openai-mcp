@@ -93,6 +93,7 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__get_command_whitelist", "mcp__local_llm__get_job",
               "mcp__local_llm__list_jobs", "mcp__local_llm__control_job",
               "mcp__local_llm__get_server_info", "mcp__local_llm__propose_write",
+              "mcp__local_llm__propose_edit",
               "mcp__local_llm__recommend_model", "mcp__local_llm__list_commits",
               "mcp__local_llm__revert_write", "mcp__local_llm__search_models",
               "mcp__local_llm__list_model_tags", "mcp__local_llm__wait"],
@@ -101,7 +102,7 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__delete_model", "mcp__local_llm__prune_models",
               "mcp__local_llm__register_tool", "mcp__local_llm__unregister_tool",
               "mcp__local_llm__update_command_whitelist", "mcp__local_llm__unload_model",
-              "mcp__local_llm__uncommit_write"]
+              "mcp__local_llm__uncommit_write", "mcp__local_llm__verify_staged"]
   }
 }
 ```
@@ -119,8 +120,10 @@ In `~/.config/devin/config.json`:
 | `classify` | Label text/files into candidate labels. |
 | `map_files` | Apply one instruction across a glob — `report` results or `stage_writes` for review. |
 | `propose_write` | Local model rewrites/creates one file → staged diff. |
+| `propose_edit` | Patch-style edit: the model returns `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` hunks instead of the whole file; the server applies them to current content and stages the result. Cheaper + safer than `propose_write` for localized changes — a non-matching hunk is a clean error, not a truncated file. |
 | `list_staged` / `get_diff` / `commit_write` / `discard_write` | Staged-write lifecycle. **Nothing the local model writes reaches disk without `commit_write`.** Commit refuses if the file drifted since staging (`force=true` overrides) — and entirely while `write_mode` is `propose`. `commit_write` requires `path` + `summary` args so the approval prompt shows *what* is being written, not just an opaque op id; the `path` is verified against the staged op. |
 | `set_write_mode` | `propose` (default): server stages diffs only; Devin applies via its own edit tools (`get_diff include_content` for full content). `write`: `commit_write` writes to disk. `persist:true` saves to config. |
+| `verify_staged` | Lint/typecheck a staged op **without touching the real file**: content is materialized to a temp file in the same directory (imports resolve), `{file}` in argv substitutes the temp path, runs under the command whitelist, then cleans up. `restore_paths` snapshots/restores side files the checker may rewrite. The local agent gets this too — `run_command` on the real path only sees old disk content. |
 | `list_commits` / `revert_write` / `uncommit_write` | Undo: `revert_write(commit_id)` stages a revert op (reviewed path); `uncommit_write(commit_id)` restores pre-commit content immediately in `write` mode (deletes files the commit created; drift-checked). |
 | `list_models` | Models per provider (sizes, capabilities, last-modified). |
 | `get_system_resources` | RAM + VRAM + loaded models (local ollama only). `ollama_gpu` reports which GPU(s) the server is pinned to (env vars) or observed using (runner process device fds). |

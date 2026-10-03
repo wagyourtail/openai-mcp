@@ -34,14 +34,14 @@ const ALLOW_TOOLS = [
   "run_local_agent", "list_models", "get_system_resources", "list_staged",
   "get_diff", "discard_write", "get_usage_stats", "list_dynamic_tools",
   "get_command_whitelist", "get_job", "list_jobs", "control_job",
-  "get_server_info", "propose_write", "recommend_model", "list_commits",
+  "get_server_info", "propose_write", "propose_edit", "recommend_model", "list_commits",
   "revert_write", "search_models", "list_model_tags", "wait",
 ].map((t) => `mcp__local_llm__${t}`);
 
 const ASK_TOOLS = [
   "commit_write", "set_write_mode", "pull_model", "download_model",
   "delete_model", "prune_models", "register_tool", "unregister_tool",
-  "update_command_whitelist", "unload_model", "uncommit_write",
+  "update_command_whitelist", "unload_model", "uncommit_write", "verify_staged",
 ].map((t) => `mcp__local_llm__${t}`);
 
 interface ProviderDraft {
