@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsGuard } from "../src/lib/fs-guard.ts";
-import { stageWrite, getOp, listOps, commitOp, discardOp, listCommits, revertCommit } from "../src/lib/staging.ts";
+import { stageWrite, getOp, listOps, commitOp, discardOp, listCommits, revertCommit, uncommitOp } from "../src/lib/staging.ts";
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "staging-"));
@@ -101,6 +101,40 @@ test("revert restores byte-exact content without newline normalization", async (
   assert.equal(revert.newContent, "original-no-newline");
   await commitOp(guard, revert.id);
   assert.equal(readFileSync(join(root, "nonl.txt"), "utf-8"), "original-no-newline");
+});
+
+test("uncommit restores a modified file in one call and is itself revertible", async () => {
+  const { root, guard } = setup();
+  const op = stageWrite(guard, { path: join(root, "a.txt"), content: "v2\n" }, 60_000);
+  const { commitId } = await commitOp(guard, op.id);
+  const r = await uncommitOp(guard, commitId);
+  assert.equal(readFileSync(join(root, "a.txt"), "utf-8"), "line1\nline2\n");
+  assert.equal(r.deleted, false);
+  // the undo is a commit too — uncommitting it redoes the write
+  await uncommitOp(guard, r.commitId);
+  assert.equal(readFileSync(join(root, "a.txt"), "utf-8"), "v2\n");
+});
+
+test("uncommit deletes a file the commit created", async () => {
+  const { root, guard } = setup();
+  const p = join(root, "new", "file.txt");
+  const op = stageWrite(guard, { path: p, content: "fresh\n" }, 60_000);
+  const { commitId } = await commitOp(guard, op.id);
+  assert.equal(existsSync(p), true);
+  const r = await uncommitOp(guard, commitId);
+  assert.equal(r.deleted, true);
+  assert.equal(existsSync(p), false);
+});
+
+test("uncommit refuses on drift unless forced", async () => {
+  const { root, guard } = setup();
+  const op = stageWrite(guard, { path: join(root, "a.txt"), content: "v2\n" }, 60_000);
+  const { commitId } = await commitOp(guard, op.id);
+  writeFileSync(join(root, "a.txt"), "human edit after commit\n");
+  await assert.rejects(() => uncommitOp(guard, commitId), /changed after the commit/);
+  const r = await uncommitOp(guard, commitId, true);
+  assert.equal(r.drifted, true);
+  assert.equal(readFileSync(join(root, "a.txt"), "utf-8"), "line1\nline2\n");
 });
 
 test("revert stages an op restoring pre-commit content", async () => {
