@@ -89,7 +89,8 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__list_jobs", "mcp__local_llm__control_job",
               "mcp__local_llm__get_server_info", "mcp__local_llm__propose_write",
               "mcp__local_llm__recommend_model", "mcp__local_llm__list_commits",
-              "mcp__local_llm__revert_write"],
+              "mcp__local_llm__revert_write", "mcp__local_llm__search_models",
+              "mcp__local_llm__list_model_tags"],
     "ask":   ["mcp__local_llm__commit_write", "mcp__local_llm__set_write_mode",
               "mcp__local_llm__pull_model", "mcp__local_llm__download_model",
               "mcp__local_llm__delete_model", "mcp__local_llm__prune_models",
@@ -118,6 +119,8 @@ In `~/.config/devin/config.json`:
 | `list_models` | Models per provider (sizes, capabilities, last-modified). |
 | `get_system_resources` | RAM + VRAM + loaded models (local ollama only). `ollama_gpu` reports which GPU(s) the server is pinned to (env vars) or observed using (runner process device fds). |
 | `recommend_model` | Rank installed models vs detected memory budget (pinned/observed GPU > discrete GPU > RAM); `apply:true` writes `default_model` to config and applies live. |
+| `search_models` | Search the public ollama registry for models — name, description, capability chips (tools/thinking/vision), parameter sizes, installed flag. |
+| `list_model_tags` | Pullable tags for a registry model (`gemma4` → `e4b`, `12b`, `26b`, …); `include_sizes:true` fetches real download sizes via the manifest API. |
 | `pull_model` | Download a model on ollama — background job, poll `get_job`. |
 | `control_job` | Steer a running job: `pause`/`resume`/`cancel`/`inject` (inject = operator instruction the local agent sees next step). |
 | `download_model` | Download from Hugging Face via `hf` CLI (for llama.cpp/TabbyAPI/vLLM servers). Background job. |

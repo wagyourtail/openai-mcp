@@ -5,6 +5,7 @@ import type { ServerContext } from "../context.ts";
 import { jsonResult } from "./helpers.ts";
 import { controlJob, createJob, finishJob, getJob, listJobs, updateJob, type JobAction } from "../lib/jobs.ts";
 import { normPci, ollamaGpuPlacement, systemResources, type GpuInfo, type OllamaGpuPlacement } from "../lib/sysinfo.ts";
+import { listRegistryTags, searchRegistry } from "../lib/registry.ts";
 import { pruneCandidates, rankModels } from "../lib/modelpick.ts";
 import { patchProvider } from "../config.ts";
 import { getStats } from "../lib/usage.ts";
@@ -117,6 +118,73 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         .then(() => finishJob(job.id))
         .catch((e) => finishJob(job.id, e instanceof Error ? e.message : String(e)));
       return jsonResult({ job_id: job.id, model, provider: p.name, note: "Poll get_job for progress." });
+    },
+  );
+
+  server.registerTool(
+    "search_models",
+    {
+      description:
+        "Search the public ollama registry (ollama.com) for models to pull_model. Returns name, " +
+        "description, capability chips (tools/thinking/vision), available parameter sizes, and " +
+        "whether the family is already installed. Requires internet access.",
+      inputSchema: {
+        query: z.string().describe("Search terms, e.g. 'coder', 'qwen3 small'"),
+        category: z
+          .enum(["tools", "thinking", "vision", "embedding", "cloud"])
+          .optional()
+          .describe("Filter by capability category"),
+        limit: z.number().int().min(1).max(25).optional().describe("Max results (default 12)"),
+        provider: z.string().optional().describe("Provider to check installed models against"),
+      },
+    },
+    async ({ query, category, limit, provider: pName }) => {
+      const hits = await searchRegistry(query, { category, limit });
+      const p = ctx.providers.get(pName);
+      const installed = p.type === "ollama" ? (await p.listModels()).map((m) => m.id) : [];
+      const families = new Set(installed.map((id) => id.split(":")[0]));
+      return jsonResult({
+        registry: "ollama.com",
+        results: hits.map((h) => ({ ...h, installed: families.has(h.name) })),
+        note: "Pull a match with pull_model {model: '<name>:<tag>'} — see list_model_tags for available tags.",
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_model_tags",
+    {
+      description:
+        "List pullable tags for a model in the ollama registry (e.g. model 'gemma4' -> " +
+        "e4b, 12b, 26b, ...). With include_sizes=true, fetches each tag's download size from the " +
+        "registry manifest API (one request per tag). Requires internet access.",
+      inputSchema: {
+        model: z.string().describe("Model name without tag, e.g. 'gemma4'"),
+        include_sizes: z.boolean().optional().describe("Fetch real download size per tag (slower)"),
+        limit: z.number().int().min(1).max(50).optional().describe("Max tags (default 30)"),
+        provider: z.string().optional().describe("Provider to check installed models against"),
+      },
+    },
+    async ({ model, include_sizes, limit, provider: pName }) => {
+      const tags = await listRegistryTags(model, { includeSizes: include_sizes, limit: limit ?? 30 });
+      if (!tags.length) {
+        return jsonResult({
+          model,
+          tags: [],
+          warning: `no tags found — is "${model}" a valid ollama registry name? (search_models can find it)`,
+        });
+      }
+      const p = ctx.providers.get(pName);
+      const installed = p.type === "ollama" ? new Set((await p.listModels()).map((m) => m.id)) : new Set<string>();
+      const norm = (id: string) => (id.includes(":") ? id : `${id}:latest`);
+      return jsonResult({
+        model,
+        tags: tags.map((t) => ({
+          ...t,
+          size_gb: t.sizeBytes ? Math.round(t.sizeBytes / 1e9 * 10) / 10 : undefined,
+          installed: [...installed].some((i) => norm(i) === norm(t.fullName)),
+        })),
+      });
     },
   );
 
