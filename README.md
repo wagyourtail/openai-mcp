@@ -103,7 +103,7 @@ In `~/.config/devin/config.json`:
 | `classify` | Label text/files into candidate labels. |
 | `map_files` | Apply one instruction across a glob — `report` results or `stage_writes` for review. |
 | `propose_write` | Local model rewrites/creates one file → staged diff. |
-| `list_staged` / `get_diff` / `commit_write` / `discard_write` | Staged-write lifecycle. **Nothing the local model writes reaches disk without `commit_write`.** Commit refuses if the file drifted since staging (`force=true` overrides) — and entirely while `write_mode` is `propose`. |
+| `list_staged` / `get_diff` / `commit_write` / `discard_write` | Staged-write lifecycle. **Nothing the local model writes reaches disk without `commit_write`.** Commit refuses if the file drifted since staging (`force=true` overrides) — and entirely while `write_mode` is `propose`. `commit_write` requires `path` + `summary` args so the approval prompt shows *what* is being written, not just an opaque op id; the `path` is verified against the staged op. |
 | `set_write_mode` | `propose` (default): server stages diffs only; Devin applies via its own edit tools (`get_diff include_content` for full content). `write`: `commit_write` writes to disk. `persist:true` saves to config. |
 | `list_commits` / `revert_write` | Undo: `revert_write(commit_id)` stages a revert op restoring pre-commit content. |
 | `list_models` | Models per provider (sizes, capabilities). |
@@ -136,7 +136,8 @@ Two free/cheap progress channels:
   Default `write_mode: "propose"` means the server *never* writes — Devin reviews `get_diff` and applies
   through its own edit tools, so changes go through Devin's native file-review flow (at the cost of the
   diff/content tokens). `set_write_mode("write")` (or `write_mode: "write"` in config) lets
-  `commit_write` apply server-side — those bypass Devin's edit-review UI but stay git-visible, and
+  `commit_write` apply server-side — those bypass Devin's edit-review UI but stay git-visible. The
+  required `path`/`summary` args keep the `ask`-permission prompt meaningful, and
   `commit_write`/`set_write_mode` belong in `ask` permissions either way.
 - **`run_command`**: whitelist-only, executed via `execFile` argv — **no shell**, so `;`, `&&`, `|`, `>`
   are literal arguments and can't inject. `allow_args` constrains subcommands (e.g. git → read-only verbs).

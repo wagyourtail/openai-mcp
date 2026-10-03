@@ -25,6 +25,7 @@ export interface CommittedOp {
   oldContent: string;
   committedContent: string;
   committedAt: number;
+  summary?: string;
 }
 
 const ops = new Map<string, StagedOp>();
@@ -104,6 +105,7 @@ export async function commitOp(
   guard: FsGuard,
   id: string,
   force = false,
+  summary?: string,
 ): Promise<{ path: string; bytes: number; commitId: string; drifted: boolean }> {
   const op = ops.get(id);
   if (!op) throw new Error(`no staged op with id ${id} (expired or never existed)`);
@@ -128,6 +130,7 @@ export async function commitOp(
     oldContent: op.oldContent,
     committedContent: op.newContent,
     committedAt: Date.now(),
+    summary,
   };
   history.set(commit.id, commit);
   if (history.size > MAX_HISTORY) {

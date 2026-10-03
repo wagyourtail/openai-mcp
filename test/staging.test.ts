@@ -70,6 +70,14 @@ test("commit refuses when file drifted since staging, force overrides", async ()
   assert.equal(readFileSync(join(root, "a.txt"), "utf-8"), "v2\n");
 });
 
+test("commit stores an optional summary on the commit record", async () => {
+  const { root, guard } = setup();
+  const op = stageWrite(guard, { path: join(root, "a.txt"), content: "v2\n" }, 60_000);
+  const { commitId } = await commitOp(guard, op.id, false, "rewrite a.txt");
+  const rec = listCommits().find((c) => c.id === commitId);
+  assert.equal(rec?.summary, "rewrite a.txt");
+});
+
 test("revert stages an op restoring pre-commit content", async () => {
   const { root, guard } = setup();
   const op = stageWrite(guard, { path: join(root, "a.txt"), content: "v2\n" }, 60_000);

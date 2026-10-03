@@ -123,7 +123,12 @@ async function main(): Promise<void> {
   });
   console.log("op:", pw.op_id, "kind:", pw.kind);
   console.log("diff:", String(pw.diff).slice(0, 400));
-  const commit = await call(client, "commit_write", { op_id: pw.op_id });
+  await call(client, "set_write_mode", { mode: "write" });
+  const commit = await call(client, "commit_write", {
+    op_id: pw.op_id,
+    path: pw.path,
+    summary: "redact phone number in data.txt",
+  });
   console.log("committed:", JSON.stringify(commit));
   console.log("file now:", readFileSync(join(work, "data.txt"), "utf-8").trim());
   if (existsSync(join(work, "data.txt"))) {

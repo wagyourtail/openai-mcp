@@ -30,14 +30,18 @@ decisions, or anything where a wrong answer is worse than no answer — small mo
 produce plausible garbage sometimes. Use verify:"self" for a second-pass check.
 
 PRAGMATIC WRITE WORKFLOW:
-- Default write_mode is "propose": nothing reaches disk. You review get_diff and
-  apply the change with YOUR OWN edit tools. Best for consequential changes —
-  the diff tokens are a fair price for keeping your native review flow.
+- Default write_mode is "propose": nothing reaches disk and commit_write
+  REFUSES — don't call it (its permission prompt would show only an opaque
+  op_id anyway). Review get_diff and apply the change with YOUR OWN edit tools
+  instead, so the user's native review UI shows the real diff. Best for
+  consequential changes.
 - For bulk mechanical batches (map_files over many files), propose mode forces
   you to re-write every file — expensive. Instead: set_write_mode("write") for
   the batch (it belongs in ask-permissions), review a SAMPLE of diffs with
-  get_diff, commit_write the batch, then revert_write anything bad. Set it back
-  to "propose" when done.
+  get_diff, then commit_write each op. commit_write requires 'path' and
+  'summary' — that's all the user's approval prompt shows, so make the summary
+  say exactly what is being written. revert_write anything bad, then set the
+  mode back to "propose".
 - Long delegations: sync calls that outlast agent_sync_grace_ms return a job_id
   (poll get_job) instead of losing the result; run_async:true skips the wait.
   Steer with control_job — inject corrections mid-flight, pause, or cancel.

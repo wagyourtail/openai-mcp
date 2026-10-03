@@ -122,13 +122,22 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       description:
         "Apply a staged write to disk (atomic: tmp+rename). Call only AFTER reviewing the diff with " +
         "get_diff. Refuses if the file changed since it was staged — pass force=true to overwrite anyway. " +
-        "Only works when write_mode is 'write' — in 'propose' mode apply the diff with your own tools.",
+        "Only works when write_mode is 'write' — do NOT call it in 'propose' mode (it refuses and the " +
+        "permission prompt would just show an opaque op_id). `path` and `summary` are REQUIRED because " +
+        "the user's approval prompt only shows tool args — make them say exactly what is being written.",
       inputSchema: {
         op_id: z.string(),
+        path: z
+          .string()
+          .describe("REQUIRED: the file this op writes — verified against the staged op so the approval prompt can't lie about the target."),
+        summary: z
+          .string()
+          .min(1)
+          .describe("REQUIRED: one-line description of the change, e.g. 'sort list items alphabetically' — the main thing the user sees when approving."),
         force: z.boolean().optional().describe("Commit even if the file changed since staging"),
       },
     },
-    async ({ op_id, force }) => {
+    async ({ op_id, path, summary, force }) => {
       if (ctx.writeMode !== "write") {
         throw new Error(
           "write_mode is 'propose' — the server won't write to disk. Apply the staged diff with your own " +
@@ -136,7 +145,13 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             "set_write_mode('write') to enable server-side commits.",
         );
       }
-      const r = await commitOp(ctx.guard, op_id, force ?? false);
+      const op = getOp(op_id);
+      if (!op) throw new Error(`no staged op with id ${op_id} (expired or never existed)`);
+      const claimed = ctx.guard.resolve(path);
+      if (claimed !== op.path) {
+        throw new Error(`path mismatch: op ${op_id} writes ${op.path}, not ${claimed}`);
+      }
+      const r = await commitOp(ctx.guard, op_id, force ?? false, summary);
       return jsonResult({
         committed: r.path,
         bytes: r.bytes,
