@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, stripFences, trackedChat } from "./helpers.ts";
+import { jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite } from "../lib/staging.ts";
 import { patchConfig } from "../config.ts";
 
@@ -22,8 +22,10 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         num_ctx: z.number().int().optional(),
       },
     },
-    async ({ path, instruction, model, provider: pName, num_ctx }) => {
+    async ({ path, instruction, model, provider: pName, num_ctx }, extra) => {
+      const report = makeProgress(extra as ProgressExtra);
       const { provider, model: m } = pickModel(ctx, pName, model);
+      report(`generating: ${path}`);
       const { content } = await ctx.guard.readFile(path).catch((e) => {
         // New file: guard.resolve already validated the parent dir inside roots.
         if (String(e).includes("does not exist")) {
@@ -41,6 +43,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           { role: "user", content: `File: ${path}\n\n${content}` },
         ],
       });
+      report(`staged: ${path}`);
       const op = stageWrite(ctx.guard, { path, content: stripFences(res.content), source: "propose_write" }, ctx.config.limits.stage_ttl_s * 1000);
       return jsonResult({
         op_id: op.id,

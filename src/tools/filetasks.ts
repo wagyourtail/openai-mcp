@@ -70,11 +70,13 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ instruction, max_chars_per_file, concurrency, text, path, paths, glob, model, provider: pName, temperature, num_ctx }) => {
+    async ({ instruction, max_chars_per_file, concurrency, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const instr = instruction ?? "Summarize this concisely: purpose, key items, anything notable.";
       const delegated = sources.reduce((s, x) => s + x.bytes, 0);
+      const report = makeProgress(extra as ProgressExtra, sources.length);
+      let done = 0;
       const summaries = await pool(sources, concurrency ?? 2, async (src) => {
         const { res, usage } = await trackedChat(
           "summarize",
@@ -90,6 +92,8 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
           },
           src.bytes,
         );
+        done++;
+        report(`${done}/${sources.length}: ${src.label}`, done);
         return { source: src.label, summary: res.content, usage };
       });
       return jsonResult({ summaries, delegated_bytes: delegated });
@@ -109,11 +113,13 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ instruction, schema, text, path, paths, glob, model, provider: pName, temperature, num_ctx }) => {
+    async ({ instruction, schema, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const results = [];
       const delegated = sources.reduce((s, x) => s + x.bytes, 0);
+      const report = makeProgress(extra as ProgressExtra, sources.length);
+      let done = 0;
       for (const src of sources) {
         const baseMessages = [
           {
@@ -172,6 +178,8 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
           ...(lastErr ? { error: lastErr, needs_review: true } : {}),
           attempts,
         });
+        done++;
+        report(`${done}/${sources.length}: ${src.label}`, done);
       }
       return jsonResult({ results, delegated_bytes: delegated });
     },
@@ -188,10 +196,12 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ labels, multi_label, text, path, paths, glob, model, provider: pName, temperature, num_ctx }) => {
+    async ({ labels, multi_label, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const delegated = sources.reduce((s, x) => s + x.bytes, 0);
+      const report = makeProgress(extra as ProgressExtra, sources.length);
+      let done = 0;
       const schema = {
         type: "object",
         properties: {
@@ -228,6 +238,8 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         }
         const picked = (parsed.labels ?? []).filter((l) => labels.includes(l));
         results.push({ source: src.label, labels: picked, reasoning: parsed.reasoning, usage });
+        done++;
+        report(`${done}/${sources.length}: ${src.label}`, done);
       }
       return jsonResult({ results, delegated_bytes: delegated });
     },
