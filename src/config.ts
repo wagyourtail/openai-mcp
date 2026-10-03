@@ -55,6 +55,7 @@ export const ConfigSchema = z.object({
       commands: z.record(z.string(), WhitelistEntrySchema).default({}),
     })
     .default({ enabled: true, commands: {} }),
+  write_mode: z.enum(["propose", "write"]).default("propose"),
   limits: LimitsSchema.default({}),
 });
 
@@ -128,6 +129,17 @@ export function loadConfig(): { config: Config; path: string; exists: boolean } 
     parsed.command_whitelist.commands = { ...DEFAULT_COMMANDS };
   }
   return { config: parsed, path, exists };
+}
+
+/** Merge top-level keys into the config file on disk (creating it if needed). */
+export async function patchConfig(path: string, patch: Record<string, unknown>): Promise<void> {
+  let raw: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  }
+  Object.assign(raw, patch);
+  mkdirSync(join(path, ".."), { recursive: true });
+  await writeFile(path, JSON.stringify(raw, null, 2) + "\n", "utf-8");
 }
 
 export async function saveCommandWhitelist(

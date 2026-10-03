@@ -114,6 +114,11 @@ async function main(): Promise<void> {
   if (runCmd) env.LOCAL_LLM_RUN_COMMAND = "1";
   if (dynTools) env.LOCAL_LLM_DYNAMIC_TOOLS = "1";
 
+  const writeMode = await ask(
+    "Write mode — 'propose' (server only stages diffs; Devin applies) or 'write' (commit_write writes to disk)",
+    "propose",
+  );
+
   rl.close();
 
   const config = {
@@ -121,6 +126,7 @@ async function main(): Promise<void> {
     providers,
     trust_cwd: trustCwd,
     allowed_roots: roots,
+    write_mode: writeMode === "write" ? "write" : "propose",
     limits: { num_ctx: 16384 },
   };
 

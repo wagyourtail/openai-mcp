@@ -296,7 +296,11 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         results,
         staged_ops: output === "stage_writes" ? results.map((r) => (r as { staged_op?: string }).staged_op) : undefined,
         delegated_bytes: delegated,
-        note: output === "stage_writes" ? "Review each op with get_diff, then commit_write or discard_write." : undefined,
+        note: output === "stage_writes"
+          ? ctx.writeMode === "write"
+            ? "Review each op with get_diff, then commit_write or discard_write."
+            : "Staged only (write_mode=propose): review with get_diff and apply with your own tools, or discard_write."
+          : undefined,
       });
     },
   );

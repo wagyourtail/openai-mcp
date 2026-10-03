@@ -7,6 +7,8 @@ export interface ServerContext {
   configPath: string;
   providers: Providers;
   guard: FsGuard;
+  /** "propose" = staged ops only, commit_write refused. "write" = commits allowed. */
+  writeMode: "propose" | "write";
   env: {
     runCommand: boolean;
     dynamicTools: boolean;
@@ -22,6 +24,7 @@ export function buildContext(): ServerContext {
     configPath: path,
     providers,
     guard,
+    writeMode: config.write_mode,
     env: {
       runCommand: process.env.LOCAL_LLM_RUN_COMMAND === "1",
       dynamicTools: process.env.LOCAL_LLM_DYNAMIC_TOOLS === "1",

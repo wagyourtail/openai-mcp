@@ -4,6 +4,7 @@ import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
 import { jsonResult, stripFences, trackedChat } from "./helpers.ts";
 import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite } from "../lib/staging.ts";
+import { patchConfig } from "../config.ts";
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -47,7 +48,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         kind: op.existedBefore ? "modify" : "create",
         diff: op.diff,
         usage,
-        note: "Review the diff, then commit_write(op_id) or discard_write(op_id).",
+        note: ctx.writeMode === "write"
+          ? "Review the diff, then commit_write(op_id) or discard_write(op_id)."
+          : "Staged only (write_mode=propose): apply this diff with your own tools, or discard_write(op_id).",
       });
     },
   );
@@ -61,6 +64,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     async () =>
       jsonResult({
         ops: listOps(),
+        write_mode: ctx.writeMode,
         note: "Use get_diff(op_id) to inspect, commit_write(op_id) to apply, discard_write(op_id) to drop.",
       }),
   );
@@ -69,12 +73,43 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     "get_diff",
     {
       description: "Show the unified diff for a staged write op.",
-      inputSchema: { op_id: z.string() },
+      inputSchema: {
+        op_id: z.string(),
+        include_content: z.boolean().optional().describe("Also return the full new file content (for applying via your own edit tools in propose mode)"),
+      },
     },
-    async ({ op_id }) => {
+    async ({ op_id, include_content }) => {
       const op = getOp(op_id);
       if (!op) throw new Error(`no staged op ${op_id}`);
-      return jsonResult({ op_id, path: op.path, kind: op.existedBefore ? "modify" : "create", needs_review: op.needsReview, note: op.reviewNote, diff: op.diff });
+      return jsonResult({
+        op_id,
+        path: op.path,
+        kind: op.existedBefore ? "modify" : "create",
+        needs_review: op.needsReview,
+        note: op.reviewNote,
+        write_mode: ctx.writeMode,
+        diff: op.diff,
+        ...(include_content ? { new_content: op.newContent } : {}),
+      });
+    },
+  );
+
+  server.registerTool(
+    "set_write_mode",
+    {
+      description:
+        "Switch the server's write posture. 'propose' (default): staged writes only — commit_write " +
+        "is refused; you apply diffs with your own tools. 'write': commit_write applies staged ops " +
+        "to disk. persist=true also writes the choice to the server config file.",
+      inputSchema: {
+        mode: z.enum(["propose", "write"]),
+        persist: z.boolean().optional().describe("Also save to the server config file"),
+      },
+    },
+    async ({ mode, persist }) => {
+      ctx.writeMode = mode;
+      if (persist) await patchConfig(ctx.configPath, { write_mode: mode });
+      return jsonResult({ write_mode: mode, persisted: persist ?? false });
     },
   );
 
@@ -83,13 +118,21 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     {
       description:
         "Apply a staged write to disk (atomic: tmp+rename). Call only AFTER reviewing the diff with " +
-        "get_diff. Refuses if the file changed since it was staged — pass force=true to overwrite anyway.",
+        "get_diff. Refuses if the file changed since it was staged — pass force=true to overwrite anyway. " +
+        "Only works when write_mode is 'write' — in 'propose' mode apply the diff with your own tools.",
       inputSchema: {
         op_id: z.string(),
         force: z.boolean().optional().describe("Commit even if the file changed since staging"),
       },
     },
     async ({ op_id, force }) => {
+      if (ctx.writeMode !== "write") {
+        throw new Error(
+          "write_mode is 'propose' — the server won't write to disk. Apply the staged diff with your own " +
+            "edit tools (get_diff for the patch / include_content for full content), or call " +
+            "set_write_mode('write') to enable server-side commits.",
+        );
+      }
       const r = await commitOp(ctx.guard, op_id, force ?? false);
       return jsonResult({
         committed: r.path,

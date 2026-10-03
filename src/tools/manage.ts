@@ -222,6 +222,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           };
         }),
         allowed_roots: ctx.guard.rootDetails,
+        write_mode: ctx.writeMode,
         flags: {
           run_command: ctx.env.runCommand,
           dynamic_tools: ctx.env.dynamicTools,

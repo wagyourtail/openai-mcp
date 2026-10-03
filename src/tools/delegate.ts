@@ -138,7 +138,9 @@ async function doDelegate(
     delegated_bytes: delegated,
     usage,
     note: newOps.length
-      ? "Staged writes are NOT on disk. Review with get_diff(op_id), then commit_write or discard_write."
+      ? ctx.writeMode === "write"
+        ? "Staged writes are NOT on disk. Review with get_diff(op_id), then commit_write or discard_write."
+        : "Staged writes are NOT on disk (write_mode=propose). Review with get_diff(op_id) and apply with your own tools, or discard_write."
       : undefined,
   };
 }
