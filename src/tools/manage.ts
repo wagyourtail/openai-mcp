@@ -9,6 +9,7 @@ import { listRegistryTags, searchRegistry } from "../lib/registry.ts";
 import { pruneCandidates, rankModels } from "../lib/modelpick.ts";
 import { patchProvider } from "../config.ts";
 import { getStats, getModelUse } from "../lib/usage.ts";
+import { searchBackend } from "../lib/filesearch.ts";
 import { safeEnv } from "../lib/whitelist.ts";
 
 let hfCli: string | null | undefined;
@@ -607,6 +608,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           dynamic_tools: ctx.env.dynamicTools,
           agent_async: ctx.config.agent_async,
           agent_sync_grace_ms: ctx.config.agent_sync_grace_ms,
+          search_files_backend: await searchBackend(),
         },
         command_whitelist: {
           enabled: ctx.config.command_whitelist.enabled,

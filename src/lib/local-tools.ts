@@ -1,13 +1,11 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { stripFences } from "../tools/helpers.ts";
 import type { LocalTool } from "./agent-loop.ts";
 import type { FsGuard } from "./fs-guard.ts";
 import { stageWrite } from "./staging.ts";
 import { checkCommand, runWhitelisted, type CommandWhitelist } from "./whitelist.ts";
+import { searchFiles } from "./filesearch.ts";
 import { executeDynamicTool, getDynamicTool, listDynamicTools } from "./dynamic-tools.ts";
 
-const execFileP = promisify(execFile);
 const OBJ = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
   properties,
@@ -60,7 +58,8 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
       spec: {
         name: "search_files",
         description:
-          "Search file contents with ripgrep (regex). Returns matching lines with path:line.",
+          "Search file contents (regex — uses ripgrep when installed, built-in " +
+          "fallback otherwise). Returns matching lines with path:line.",
         parameters: OBJ(
           {
             pattern: { type: "string", description: "Regex pattern" },
@@ -73,17 +72,12 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
       delegates: true,
       async execute(args) {
         const target = args.path ? guard.resolve(String(args.path)) : guard.rootList[0];
-        const argv = ["--line-number", "--no-heading", "--color=never", "-e", String(args.pattern)];
-        if (args.glob) argv.push("-g", String(args.glob));
-        argv.push(target);
-        try {
-          const { stdout } = await execFileP("rg", argv, { timeout: 15000, maxBuffer: 1024 * 1024 });
-          return truncate(stdout || "(no matches)", deps.searchOutputChars);
-        } catch (e) {
-          const err = e as { code?: number; stdout?: string; stderr?: string };
-          if (err.code === 1) return "(no matches)";
-          return `error: ${err.stderr || "search failed"}`;
-        }
+        const out = await searchFiles({
+          pattern: String(args.pattern),
+          target,
+          glob: args.glob ? String(args.glob) : undefined,
+        });
+        return truncate(out, deps.searchOutputChars);
       },
     },
     {

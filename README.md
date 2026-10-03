@@ -21,7 +21,7 @@ free-tier version of Devin's cloud subagents.
 
 - Node **>= 22.18** (runs TypeScript natively — no build step). Verified on Node 26.
 - Ollama (`ollama serve`) for the default provider, or any OpenAI-compatible `/v1` endpoint.
-- `rg` (ripgrep) if you want `search_files`.
+- `rg` (ripgrep) is optional — `search_files` uses it when installed and falls back to a built-in walker (gitignore-aware, hidden/binary skipped) when it isn't.
 - `nvtop` (optional) for the best GPU detection — all vendors + per-process usage; falls back to `nvidia-smi`/`rocm-smi`.
 
 ## Setup
