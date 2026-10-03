@@ -263,6 +263,36 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
   );
 
   server.registerTool(
+    "wait",
+    {
+      description:
+        "Sleep for a number of seconds (max 600), then return. With job_id, returns early " +
+        "as soon as that job reaches done/error — use to poll pull_model/run_local_agent " +
+        "without busy-looping get_job.",
+      inputSchema: {
+        seconds: z.number().min(0).max(600).describe("Seconds to wait (fractions allowed)"),
+        job_id: z.string().optional().describe("Return early when this job finishes"),
+      },
+    },
+    async ({ seconds, job_id }) => {
+      const start = Date.now();
+      const deadline = start + seconds * 1000;
+      let job = job_id ? getJob(job_id) : undefined;
+      if (job_id && !job) throw new Error(`no job ${job_id}`);
+      const jid = job_id;
+      while (Date.now() < deadline) {
+        if (job && job.status !== "running") break;
+        await new Promise((r) => setTimeout(r, Math.min(500, deadline - Date.now())));
+        if (job && jid) job = getJob(jid);
+      }
+      return jsonResult({
+        waited_s: Math.round((Date.now() - start) / 100) / 10,
+        ...(job ? { job: { id: job.id, kind: job.kind, status: job.status, error: job.error } } : {}),
+      });
+    },
+  );
+
+  server.registerTool(
     "control_job",
     {
       description:

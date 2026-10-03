@@ -35,7 +35,7 @@ const ALLOW_TOOLS = [
   "get_diff", "discard_write", "get_usage_stats", "list_dynamic_tools",
   "get_command_whitelist", "get_job", "list_jobs", "control_job",
   "get_server_info", "propose_write", "recommend_model", "list_commits",
-  "revert_write", "search_models", "list_model_tags",
+  "revert_write", "search_models", "list_model_tags", "wait",
 ].map((t) => `mcp__local_llm__${t}`);
 
 const ASK_TOOLS = [

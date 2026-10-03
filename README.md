@@ -95,7 +95,7 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__get_server_info", "mcp__local_llm__propose_write",
               "mcp__local_llm__recommend_model", "mcp__local_llm__list_commits",
               "mcp__local_llm__revert_write", "mcp__local_llm__search_models",
-              "mcp__local_llm__list_model_tags"],
+              "mcp__local_llm__list_model_tags", "mcp__local_llm__wait"],
     "ask":   ["mcp__local_llm__commit_write", "mcp__local_llm__set_write_mode",
               "mcp__local_llm__pull_model", "mcp__local_llm__download_model",
               "mcp__local_llm__delete_model", "mcp__local_llm__prune_models",
@@ -128,6 +128,7 @@ In `~/.config/devin/config.json`:
 | `list_model_tags` | Pullable tags for a registry model (`gemma4` → `e4b`, `12b`, `26b`, …); `include_sizes:true` fetches real download sizes via the manifest API. |
 | `pull_model` | Download a model on ollama — background job, poll `get_job`. |
 | `control_job` | Steer a running job: `pause`/`resume`/`cancel`/`inject` (inject = operator instruction the local agent sees next step). |
+| `wait` | Sleep N seconds (max 600); with `job_id` returns early when the job finishes — poll long pulls/agent runs without busy-looping `get_job`. |
 | `download_model` | Download from Hugging Face via `hf` CLI (for llama.cpp/TabbyAPI/vLLM servers). Background job. |
 | `unload_model` | Free a model's VRAM. |
 | `delete_model` | Permanently delete a model (irreversible). Refuses to delete the provider default or a loaded model without `force:true`. |
