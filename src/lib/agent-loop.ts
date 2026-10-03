@@ -35,6 +35,7 @@ export async function runAgentLoop(params: {
   numCtx?: number;
   timeoutS: number;
   toolResultChars: number;
+  onProgress?: (info: { step: number; note: string }) => void;
 }): Promise<AgentLoopResult> {
   const { provider, model } = params;
   const messages: ChatMessage[] = [
@@ -106,6 +107,10 @@ export async function runAgentLoop(params: {
       messages.push({ role: "tool", name: tc.name, tool_call_id: tc.id, content: truncated });
     }
     steps.push(record);
+    params.onProgress?.({
+      step,
+      note: `step ${step}: ${record.toolCalls.map((t) => t.name).join(", ") || "final answer"}`,
+    });
     if (abort) {
       return { finalAnswer: lastAssistantContent(messages), steps, usage, aborted: abort };
     }

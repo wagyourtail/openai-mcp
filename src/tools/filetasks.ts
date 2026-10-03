@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, pool, stripFences, trackedChat } from "./helpers.ts";
+import { jsonResult, makeProgress, pool, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { stageWrite } from "../lib/staging.ts";
 import { validateSchema } from "../lib/schema-validate.ts";
 
@@ -253,11 +253,13 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ glob, instruction, output, max_files, concurrency, model, provider: pName, temperature, num_ctx }) => {
+    async ({ glob, instruction, output, max_files, concurrency, model, provider: pName, temperature, num_ctx }, extra) => {
       const limit = Math.min(max_files ?? ctx.config.limits.max_map_files, ctx.config.limits.max_map_files);
       const files = await ctx.guard.glob(glob, limit);
       if (files.length === 0) throw new Error(`no files match glob: ${glob}`);
       const { provider, model: m } = pickModel(ctx, pName, model);
+      const report = makeProgress(extra as ProgressExtra, files.length);
+      let done = 0;
       let delegated = 0;
       const results = await pool(files, concurrency ?? 2, async (f) => {
         const { content, bytes, truncated } = await ctx.guard.readFile(f);
@@ -280,6 +282,8 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
           },
           bytes,
         );
+        done++;
+        report(`${done}/${files.length}: ${f}`, done);
         if (output === "stage_writes") {
           const op = stageWrite(ctx.guard, { path: f, content: stripFences(res.content), source: "map_files" }, ctx.config.limits.stage_ttl_s * 1000);
           return { path: f, staged_op: op.id, diff_chars: op.diff.length, usage };

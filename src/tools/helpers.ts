@@ -50,6 +50,30 @@ export async function trackedChat(
 
 export { recordDelegatedBytes };
 
+/**
+ * MCP progress reporter. Sends `notifications/progress` ONLY if the client
+ * supplied a progressToken in the request's _meta — these go to client UI
+ * plumbing, NOT into the model's context, so they cost zero tokens.
+ */
+export interface ProgressExtra {
+  _meta?: { progressToken?: string | number };
+  sendNotification: (n: { method: string; params: Record<string, unknown> }) => Promise<void>;
+}
+
+export function makeProgress(extra: ProgressExtra, total?: number) {
+  const token = extra._meta?.progressToken;
+  let n = 0;
+  return (message: string, progress?: number): void => {
+    if (token === undefined) return;
+    void extra
+      .sendNotification({
+        method: "notifications/progress",
+        params: { progressToken: token, progress: progress ?? ++n, total, message },
+      })
+      .catch(() => {});
+  };
+}
+
 /** Run `fn` over items with a concurrency cap; preserves input order in results. */
 export async function pool<T, R>(items: T[], concurrency: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);

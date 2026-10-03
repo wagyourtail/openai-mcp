@@ -5,6 +5,7 @@ export interface Job {
   kind: string;
   status: "running" | "done" | "error";
   progress: Record<string, unknown>;
+  result?: unknown;
   error?: string;
   createdAt: string;
   finishedAt?: string;
@@ -29,11 +30,12 @@ export function updateJob(id: string, progress: Record<string, unknown>): void {
   if (j) j.progress = { ...j.progress, ...progress };
 }
 
-export function finishJob(id: string, error?: string): void {
+export function finishJob(id: string, error?: string, result?: unknown): void {
   const j = jobs.get(id);
   if (!j) return;
   j.status = error ? "error" : "done";
   j.error = error;
+  if (result !== undefined) j.result = result;
   j.finishedAt = new Date().toISOString();
 }
 

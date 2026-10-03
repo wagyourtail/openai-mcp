@@ -28,9 +28,9 @@ free-tier version of Devin's cloud subagents.
 ### 1. Server config
 
 ```bash
-mkdir -p ~/.config/openai-mcp
-cp config.example.json ~/.config/openai-mcp/config.json
-# optional: add allowed_roots for extra dirs the tools may reach beyond the project
+npm run configure     # interactive wizard: probes ollama, writes ~/.config/openai-mcp/config.json,
+                      # prints the Devin registration JSON
+# or: cp config.example.json ~/.config/openai-mcp/config.json  (edit by hand)
 ```
 
 **File roots are auto-detected.** Effective roots = `allowed_roots` (config) ∪ workspace roots the
@@ -94,7 +94,7 @@ In `~/.config/devin/config.json`:
 
 | Tool | What it does |
 |---|---|
-| `run_local_agent` | **Local subagent.** Small model runs its own tool loop; returns final answer + staged op ids. `verify:"self"` adds a critique pass. |
+| `run_local_agent` | **Local subagent.** Small model runs its own tool loop; returns final answer + staged op ids. `verify:"self"` adds a critique pass. `run_async:true` runs it as a background job (poll `get_job`). |
 | `chat` / `complete` | Raw completions passthrough. |
 | `summarize` | Summarize files/globs server-side; only summaries return. |
 | `extract` | Structured JSON extraction, optional schema validation + retry. |
@@ -113,6 +113,16 @@ In `~/.config/devin/config.json`:
 | `get_usage_stats` / `get_server_info` | Session savings + effective config. |
 
 Slash commands (MCP prompts): `/mcp__local_llm__delegate <task> [files]` and `/mcp__local_llm__cheap_summary <path> [focus]`.
+
+## Progress
+
+Two free/cheap progress channels:
+- **MCP `notifications/progress`**: `run_local_agent` reports each agent step and `map_files`
+  reports per-file completion — *if* the client attaches a `progressToken`. These go to client UI
+  plumbing, **not into the model context — zero token cost.**
+- **Job polling**: `run_async:true` on `run_local_agent` (and `pull_model`/`download_model`) returns
+  a `job_id`; `get_job` shows live progress + the final `result`. Polling costs a few tokens per
+  call, but only when Devin chooses to check.
 
 ## Safety model
 
