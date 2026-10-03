@@ -359,12 +359,14 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         // GPU identity is PCI slot. Target priority: GPUs observed in use >
         // GPUs pinned via server env > discrete GPUs (auto-select) > everything.
         const slots = pl.gpus_in_use.length ? pl.gpus_in_use : pl.pinned_slots;
+        // slots are canonPci form ("0000:04:00.0") — key matches by normPci ("04:00.0").
+        const slotKeys = new Set(slots.map(normPci));
         const pinPresent = pl.pinned_indices.length > 0;
         const discrete = res.gpus.filter((g) => !g.integrated);
         // A pin that can't be resolved must NOT fall back to auto-select —
         // sizing against a GPU ollama can't see is the original bug.
         const targets = slots.length
-          ? res.gpus.filter((g) => g.pciSlot && slots.includes(normPci(g.pciSlot)))
+          ? res.gpus.filter((g) => g.pciSlot && slotKeys.has(normPci(g.pciSlot)))
           : pinPresent
             ? []
             : (discrete.length ? discrete : res.gpus);
@@ -383,7 +385,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           // survivors, so they're usable even when the pin couldn't be mapped
           // back to a pciSlot.
           const devs = slots.length
-            ? pl.inference_devices.filter((d) => d.pci && slots.includes(normPci(d.pci)))
+            ? pl.inference_devices.filter((d) => d.pci && slotKeys.has(normPci(d.pci)))
             : pl.inference_devices;
           const jAvail = Math.max(0, ...devs.map((d) => d.availMB));
           const tTotal = Math.max(0, ...targets.map((g) => g.totalMB ?? 0), ...devs.map((d) => d.totalMB));
