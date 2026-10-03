@@ -31,6 +31,22 @@ export interface ChatRequest {
   temperature?: number;
   num_ctx?: number;
   max_tokens?: number;
+  /**
+   * Chain-of-thought control. Ollama: `think` bool, or "low"/"medium"/"high"
+   * for models with effort levels. OpenAI-compatible: best-effort mapping to
+   * `reasoning_effort` (levels) / `chat_template_kwargs.enable_thinking` (false).
+   * On thinking models, `think: false` keeps the whole token budget for the answer.
+   */
+  think?: boolean | "low" | "medium" | "high";
+  top_p?: number;
+  seed?: number;
+  stop?: string[];
+  /**
+   * Provider-native overrides. Ollama: merged into `options` (e.g. top_k,
+   * repeat_penalty, num_predict). OpenAI-compatible: merged into the request
+   * body. Wins over the named fields above and provider config `options`.
+   */
+  options?: Record<string, unknown>;
   /** JSON schema for structured output, or "json" for generic JSON mode */
   response_format?: "json" | Record<string, unknown>;
   signal?: AbortSignal;
@@ -47,6 +63,8 @@ export interface ChatResult {
   usage: Usage;
   model: string;
   finishReason?: string;
+  /** Reasoning trace, when the model/provider produces one separately from content. */
+  thinking?: string;
 }
 
 export interface ModelInfo {
@@ -56,6 +74,8 @@ export interface ModelInfo {
   contextLength?: number;
   capabilities?: string[];
   quantization?: string;
+  /** ISO timestamp the model blob was last pulled/used (ollama `modified_at`). */
+  modifiedAt?: string;
 }
 
 export interface LoadedModel {
@@ -88,6 +108,8 @@ export interface Provider {
   pull?(model: string, onProgress: (p: PullProgress) => void, signal?: AbortSignal): Promise<void>;
   ps?(): Promise<LoadedModel[]>;
   unload?(model: string): Promise<void>;
+  /** Delete a model's blobs (ollama /api/delete). Irreversible — re-pull to restore. */
+  delete?(model: string): Promise<void>;
   show?(model: string): Promise<Record<string, unknown>>;
 }
 

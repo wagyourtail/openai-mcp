@@ -2,14 +2,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, trackedChat } from "./helpers.ts";
+import { GEN_PARAMS, jsonResult, trackedChat } from "./helpers.ts";
 
 const COMMON = {
   model: z.string().optional().describe("Model to use (default: provider/config default). Use list_models to see options."),
   provider: z.string().optional().describe("Provider name from server config (default: default_provider)."),
   temperature: z.number().optional().describe("Sampling temperature (default ~0.2)."),
-  max_tokens: z.number().int().optional().describe("Max tokens to generate."),
+  max_tokens: z.number().int().optional().describe("Max tokens to generate. On thinking models, thinking consumes this budget — pass think:false for short mechanical answers."),
   num_ctx: z.number().int().optional().describe("Context window size (ollama providers only; bounded for VRAM)."),
+  ...GEN_PARAMS,
 };
 
 export function registerCompletionTools(server: McpServer, ctx: ServerContext): void {
@@ -35,7 +36,7 @@ export function registerCompletionTools(server: McpServer, ctx: ServerContext): 
         ...COMMON,
       },
     },
-    async ({ messages, response_format, model, provider: pName, temperature, max_tokens, num_ctx }) => {
+    async ({ messages, response_format, model, provider: pName, temperature, max_tokens, num_ctx, think, top_p, seed, stop, options }) => {
       const { provider, model: m } = pickModel(ctx, pName, model);
       const { res, usage } = await trackedChat("chat", provider, {
         model: m,
@@ -43,9 +44,19 @@ export function registerCompletionTools(server: McpServer, ctx: ServerContext): 
         temperature,
         max_tokens,
         num_ctx,
+        think,
+        top_p,
+        seed,
+        stop,
+        options,
         response_format,
       });
-      return jsonResult({ content: res.content, finish_reason: res.finishReason, usage });
+      return jsonResult({
+        content: res.content,
+        ...(res.thinking ? { thinking: res.thinking } : {}),
+        finish_reason: res.finishReason,
+        usage,
+      });
     },
   );
 
@@ -63,7 +74,7 @@ export function registerCompletionTools(server: McpServer, ctx: ServerContext): 
         ...COMMON,
       },
     },
-    async ({ prompt, system, response_format, model, provider: pName, temperature, max_tokens, num_ctx }) => {
+    async ({ prompt, system, response_format, model, provider: pName, temperature, max_tokens, num_ctx, think, top_p, seed, stop, options }) => {
       const { provider, model: m } = pickModel(ctx, pName, model);
       const messages = [
         ...(system ? [{ role: "system" as const, content: system }] : []),
@@ -75,9 +86,14 @@ export function registerCompletionTools(server: McpServer, ctx: ServerContext): 
         temperature,
         max_tokens,
         num_ctx,
+        think,
+        top_p,
+        seed,
+        stop,
+        options,
         response_format,
       });
-      return jsonResult({ text: res.content, usage });
+      return jsonResult({ text: res.content, ...(res.thinking ? { thinking: res.thinking } : {}), usage });
     },
   );
 }

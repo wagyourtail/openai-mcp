@@ -11,6 +11,10 @@ const ProviderConfigSchema = z.object({
   default_model: z.string().optional(),
   num_ctx: z.number().int().positive().optional(),
   temperature: z.number().optional(),
+  /** Default think setting for all requests to this provider (e.g. false for thinking models). */
+  think: z.union([z.boolean(), z.enum(["low", "medium", "high"])]).optional(),
+  /** Provider-native default options merged into every request (ollama `options` keys / openai body fields). */
+  options: z.record(z.string(), z.unknown()).optional(),
   keep_alive: z.string().optional(),
 });
 
@@ -142,6 +146,22 @@ export async function patchConfig(path: string, patch: Record<string, unknown>):
     raw = JSON.parse(readFileSync(path, "utf-8"));
   }
   Object.assign(raw, patch);
+  mkdirSync(join(path, ".."), { recursive: true });
+  await writeFile(path, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+}
+
+/** Merge keys into providers.<name> in the config file (creating it if needed). */
+export async function patchProvider(
+  path: string,
+  provider: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  let raw: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  }
+  const providers = (raw.providers ??= {}) as Record<string, Record<string, unknown>>;
+  Object.assign((providers[provider] ??= {}), patch);
   mkdirSync(join(path, ".."), { recursive: true });
   await writeFile(path, JSON.stringify(raw, null, 2) + "\n", "utf-8");
 }

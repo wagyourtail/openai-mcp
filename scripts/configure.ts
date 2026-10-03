@@ -32,12 +32,14 @@ const ALLOW_TOOLS = [
   "run_local_agent", "list_models", "get_system_resources", "list_staged",
   "get_diff", "discard_write", "get_usage_stats", "list_dynamic_tools",
   "get_command_whitelist", "get_job", "list_jobs", "control_job",
-  "get_server_info", "propose_write", "list_commits", "revert_write",
+  "get_server_info", "propose_write", "recommend_model", "list_commits",
+  "revert_write",
 ].map((t) => `mcp__local_llm__${t}`);
 
 const ASK_TOOLS = [
   "commit_write", "set_write_mode", "pull_model", "download_model",
-  "register_tool", "unregister_tool", "update_command_whitelist", "unload_model",
+  "delete_model", "prune_models", "register_tool", "unregister_tool",
+  "update_command_whitelist", "unload_model",
 ].map((t) => `mcp__local_llm__${t}`);
 
 interface ProviderDraft {
@@ -47,6 +49,8 @@ interface ProviderDraft {
   api_key_env?: string;
   num_ctx?: number;
   keep_alive?: string;
+  think?: boolean | "low" | "medium" | "high";
+  options?: Record<string, unknown>;
 }
 
 interface ExistingConfig {
@@ -136,6 +140,11 @@ async function main(): Promise<void> {
         models.find((m) => m.includes("coder")) ?? models.find((m) => m.includes("llama3.1:8b")) ?? models.sort((a, b) => a.length - b.length)[0];
       const model = await ask(`Default model${models.length ? ` (installed: ${models.join(", ")})` : ""}`, defModel ?? "llama3.1:8b");
       const p: ProviderDraft = { type, base_url: base, default_model: model };
+      const noThink = await askBool(
+        "Disable chain-of-thought by default? (recommended: thinking models like qwen3/gpt-oss/gemma4 spend max_tokens on reasoning, which can empty the answer)",
+        true,
+      );
+      if (noThink) p.think = false;
       if (type === "ollama") {
         p.num_ctx = Number(await ask("num_ctx (context window; smaller = less VRAM)", "16384"));
         p.keep_alive = "5m";

@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, makeProgress, pool, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
+import { GEN_PARAMS, jsonResult, makeProgress, pool, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { stageWrite } from "../lib/staging.ts";
 import { validateSchema } from "../lib/schema-validate.ts";
 
@@ -11,6 +11,7 @@ const COMMON = {
   provider: z.string().optional(),
   temperature: z.number().optional(),
   num_ctx: z.number().int().optional(),
+  ...GEN_PARAMS,
 };
 
 interface Source {
@@ -70,7 +71,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ instruction, max_chars_per_file, concurrency, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
+    async ({ instruction, max_chars_per_file, concurrency, text, path, paths, glob, model, provider: pName, temperature, num_ctx, ...gen }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const instr = instruction ?? "Summarize this concisely: purpose, key items, anything notable.";
@@ -89,6 +90,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
             ],
             temperature: temperature ?? 0.2,
             num_ctx,
+            ...gen,
           },
           src.bytes,
         );
@@ -113,7 +115,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ instruction, schema, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
+    async ({ instruction, schema, text, path, paths, glob, model, provider: pName, temperature, num_ctx, ...gen }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const results = [];
@@ -150,6 +152,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
               messages,
               temperature: temperature ?? 0.1,
               num_ctx,
+              ...gen,
               response_format: schema ?? "json",
             },
             src.bytes,
@@ -196,7 +199,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ labels, multi_label, text, path, paths, glob, model, provider: pName, temperature, num_ctx }, extra) => {
+    async ({ labels, multi_label, text, path, paths, glob, model, provider: pName, temperature, num_ctx, ...gen }, extra) => {
       const sources = await collectSources(ctx, { text, path, paths, glob });
       const { provider, model: m } = pickModel(ctx, pName, model);
       const delegated = sources.reduce((s, x) => s + x.bytes, 0);
@@ -226,6 +229,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
             ],
             temperature: temperature ?? 0.1,
             num_ctx,
+            ...gen,
             response_format: schema,
           },
           src.bytes,
@@ -265,7 +269,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         ...COMMON,
       },
     },
-    async ({ glob, instruction, output, max_files, concurrency, model, provider: pName, temperature, num_ctx }, extra) => {
+    async ({ glob, instruction, output, max_files, concurrency, model, provider: pName, temperature, num_ctx, ...gen }, extra) => {
       const limit = Math.min(max_files ?? ctx.config.limits.max_map_files, ctx.config.limits.max_map_files);
       const files = await ctx.guard.glob(glob, limit);
       if (files.length === 0) throw new Error(`no files match glob: ${glob}`);
@@ -291,6 +295,7 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
             ],
             temperature: temperature ?? 0.2,
             num_ctx,
+            ...gen,
           },
           bytes,
         );

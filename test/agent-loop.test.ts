@@ -82,6 +82,42 @@ test("agent loop executes a tool call emitted as plain text", async () => {
   assert.equal(res.usage.calls, 2);
 });
 
+test("agent loop forwards think/options to provider.chat", async () => {
+  let seen: Record<string, unknown> | undefined;
+  const provider: Provider = {
+    name: "fake",
+    type: "ollama",
+    baseUrl: "http://localhost:9",
+    isLocal: true,
+    async chat(req) {
+      seen = req as unknown as Record<string, unknown>;
+      return {
+        content: "done",
+        toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+        model: "fake",
+      };
+    },
+    async listModels() {
+      return [];
+    },
+  };
+  await runAgentLoop({
+    provider,
+    model: "fake",
+    system: "sys",
+    task: "x",
+    tools: [],
+    maxSteps: 1,
+    timeoutS: 10,
+    toolResultChars: 1000,
+    think: false,
+    options: { top_k: 20 },
+  });
+  assert.equal(seen?.think, false);
+  assert.deepEqual(seen?.options, { top_k: 20 });
+});
+
 test("delegatedBytes accumulates for delegate-flagged tools only", async () => {
   const readTool: LocalTool = {
     spec: { name: "reader", description: "reads a file", parameters: { type: "object" } },

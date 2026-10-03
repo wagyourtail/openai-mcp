@@ -16,6 +16,7 @@ interface OllamaMessage {
   role: string;
   content: string;
   name?: string;
+  thinking?: string;
   tool_calls?: { function: { name: string; arguments: Record<string, unknown> } }[];
 }
 
@@ -72,16 +73,25 @@ export class OllamaProvider implements Provider {
   }
 
   async chat(req: ChatRequest): Promise<ChatResult> {
+    const options: Record<string, unknown> = {
+      ...this.cfg.options,
+      num_ctx: req.num_ctx ?? this.cfg.num_ctx,
+      temperature: req.temperature ?? this.cfg.temperature,
+      num_predict: req.max_tokens,
+      top_p: req.top_p,
+      seed: req.seed,
+      stop: req.stop,
+      ...req.options,
+    };
+    for (const k of Object.keys(options)) if (options[k] === undefined) delete options[k];
     const body: Record<string, unknown> = {
       model: req.model,
       messages: req.messages.map(toWire),
       stream: false,
-      options: {
-        num_ctx: req.num_ctx ?? this.cfg.num_ctx,
-        temperature: req.temperature ?? this.cfg.temperature,
-        num_predict: req.max_tokens,
-      },
+      options,
     };
+    const think = req.think ?? this.cfg.think;
+    if (think !== undefined) body.think = think;
     if (this.cfg.keep_alive) body.keep_alive = this.cfg.keep_alive;
     if (req.tools?.length) body.tools = wireTools(req.tools);
     if (req.response_format === "json") body.format = "json";
@@ -114,6 +124,7 @@ export class OllamaProvider implements Provider {
       toolCalls,
       model: data.model,
       finishReason: data.done_reason,
+      thinking: data.message.thinking || undefined,
       usage: {
         promptTokens: data.prompt_eval_count ?? 0,
         completionTokens: data.eval_count ?? 0,
@@ -133,6 +144,7 @@ export class OllamaProvider implements Provider {
           context_length?: number;
         };
         capabilities?: string[];
+        modified_at?: string;
       }[];
     };
     return data.models.map((m) => ({
@@ -142,6 +154,7 @@ export class OllamaProvider implements Provider {
       quantization: m.details?.quantization_level,
       contextLength: m.details?.context_length,
       capabilities: m.capabilities,
+      modifiedAt: m.modified_at,
     }));
   }
 
@@ -199,6 +212,16 @@ export class OllamaProvider implements Provider {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, keep_alive: 0, stream: false }),
+    });
+  }
+
+  async delete(model: string): Promise<void> {
+    // `name` is the legacy field, `model` the current one — send both so every
+    // ollama version accepts the request.
+    await this.req("/api/delete", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: model, model }),
     });
   }
 

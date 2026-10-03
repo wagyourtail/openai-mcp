@@ -22,6 +22,7 @@ free-tier version of Devin's cloud subagents.
 - Node **>= 22.18** (runs TypeScript natively — no build step). Verified on Node 26.
 - Ollama (`ollama serve`) for the default provider, or any OpenAI-compatible `/v1` endpoint.
 - `rg` (ripgrep) if you want `search_files`.
+- `nvtop` (optional) for the best GPU detection — all vendors + per-process usage; falls back to `nvidia-smi`/`rocm-smi`.
 
 ## Setup
 
@@ -61,6 +62,11 @@ everywhere. `get_server_info` shows each root with its source.
 }
 ```
 
+Provider entries also accept `think` (bool or `"low"/"medium"/"high"`), `options`
+(provider-native request overrides), `temperature`, `num_ctx`, and `keep_alive` — defaults applied
+to every call; per-request args override them. The `configure` wizard asks about `think` since
+thinking-capable models can eat the whole `max_tokens` budget.
+
 CLI equivalent: `devin mcp add -s user local_llm -- node /path/to/openai-mcp/src/index.ts`
 
 Omit the two `LOCAL_LLM_*` env flags to disable shell access and dynamic tools entirely.
@@ -81,9 +87,11 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__get_command_whitelist", "mcp__local_llm__get_job",
               "mcp__local_llm__list_jobs", "mcp__local_llm__control_job",
               "mcp__local_llm__get_server_info", "mcp__local_llm__propose_write",
-              "mcp__local_llm__list_commits", "mcp__local_llm__revert_write"],
+              "mcp__local_llm__recommend_model", "mcp__local_llm__list_commits",
+              "mcp__local_llm__revert_write"],
     "ask":   ["mcp__local_llm__commit_write", "mcp__local_llm__set_write_mode",
               "mcp__local_llm__pull_model", "mcp__local_llm__download_model",
+              "mcp__local_llm__delete_model", "mcp__local_llm__prune_models",
               "mcp__local_llm__register_tool", "mcp__local_llm__unregister_tool",
               "mcp__local_llm__update_command_whitelist", "mcp__local_llm__unload_model"]
   }
@@ -106,17 +114,40 @@ In `~/.config/devin/config.json`:
 | `list_staged` / `get_diff` / `commit_write` / `discard_write` | Staged-write lifecycle. **Nothing the local model writes reaches disk without `commit_write`.** Commit refuses if the file drifted since staging (`force=true` overrides) — and entirely while `write_mode` is `propose`. `commit_write` requires `path` + `summary` args so the approval prompt shows *what* is being written, not just an opaque op id; the `path` is verified against the staged op. |
 | `set_write_mode` | `propose` (default): server stages diffs only; Devin applies via its own edit tools (`get_diff include_content` for full content). `write`: `commit_write` writes to disk. `persist:true` saves to config. |
 | `list_commits` / `revert_write` | Undo: `revert_write(commit_id)` stages a revert op restoring pre-commit content. |
-| `list_models` | Models per provider (sizes, capabilities). |
-| `get_system_resources` | RAM + VRAM + loaded models (local ollama only). |
+| `list_models` | Models per provider (sizes, capabilities, last-modified). |
+| `get_system_resources` | RAM + VRAM + loaded models (local ollama only). `ollama_gpu` reports which GPU(s) the server is pinned to (env vars) or observed using (runner process device fds). |
+| `recommend_model` | Rank installed models vs detected memory budget (pinned/observed GPU > discrete GPU > RAM); `apply:true` writes `default_model` to config and applies live. |
 | `pull_model` | Download a model on ollama — background job, poll `get_job`. |
 | `control_job` | Steer a running job: `pause`/`resume`/`cancel`/`inject` (inject = operator instruction the local agent sees next step). |
 | `download_model` | Download from Hugging Face via `hf` CLI (for llama.cpp/TabbyAPI/vLLM servers). Background job. |
 | `unload_model` | Free a model's VRAM. |
+| `delete_model` | Permanently delete a model (irreversible). Refuses to delete the provider default or a loaded model without `force:true`. |
+| `prune_models` | Bulk-delete old models. `dry_run:true` (default) reports candidates + reclaimable bytes; always keeps `keep[]`, the provider default, and loaded models. |
 | `register_tool` / `unregister_tool` / `list_dynamic_tools` | Give the local agent new tools at runtime (`shell` templates or `js` snippets). |
 | `get_command_whitelist` / `update_command_whitelist` | Manage what `run_command` may execute. |
 | `get_usage_stats` / `get_server_info` | Session savings + effective config. |
 
 Slash commands (MCP prompts): `/mcp__local_llm__delegate <task> [files]` and `/mcp__local_llm__cheap_summary <path> [focus]`.
+
+## Generation params
+
+Every generation tool accepts these on top of `model`/`provider`/`temperature`/`num_ctx`/`max_tokens`:
+
+| Param | Effect |
+|---|---|
+| `think` | Chain-of-thought control: `true`/`false`, or `"low"`/`"medium"`/`"high"` on models with effort levels. Maps to ollama's `think`; on openai-compatible servers `false` → `chat_template_kwargs.enable_thinking` (vLLM/llama.cpp convention), a level → `reasoning_effort`. |
+| `top_p`, `seed`, `stop` | Standard sampling controls. |
+| `options` | Provider-native override bag — merged into ollama `options` (`top_k`, `repeat_penalty`, …) or the openai-compat request body. Wins over the named params. |
+
+Set defaults per provider in config: `"think": false`, `"options": {"top_k": 20}`. Request args
+override them.
+
+**Thinking models eat `max_tokens`.** On thinking-capable models (gemma4, qwen3, gpt-oss) a tight
+`max_tokens` can be consumed entirely by reasoning, returning empty `text`. Fix per call with
+`think:false`, or globally per provider with `"think": false`. `chat`/`complete` return the model's
+`thinking` trace when the provider reports it, so the budget usage is observable.
+(`run_local_agent` accepts `think`/`options` too — disabling think leaves more context and steps
+for tool calls.)
 
 ## Progress
 
@@ -152,9 +183,21 @@ Two free/cheap progress channels:
 ## Provider config
 
 Two types:
-- `ollama` → native `/api` (chat with `num_ctx`/`keep_alive`/tools, pull, ps, unload). Local or remote.
+- `ollama` → native `/api` (chat with `num_ctx`/`keep_alive`/tools, pull, ps, unload, delete). Local or remote.
 - `openai` → generic `/v1` (chat completions, list models). Works with LM Studio, vLLM, llama.cpp,
   OpenAI proper (`api_key_env` references an env var — never store keys in the file).
+
+### Multi-GPU hosts
+
+GPU detection prefers `nvtop -s` (all vendors + per-process usage), falling back to
+`nvidia-smi`/`rocm-smi`. `get_system_resources` reports each GPU's vendor/PCI slot/free VRAM plus
+an `ollama_gpu` block: the `ollama serve` process's pinning env vars (`CUDA_VISIBLE_DEVICES`,
+`HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`, …) and which GPU device
+fds any runner processes hold. To pin ollama to a specific card — e.g. an Intel Arc A380 while a
+P100 stays reserved for a vLLM server — set the selector on the `ollama serve` process
+(`ONEAPI_DEVICE_SELECTOR=level_zero:0` for Intel, `CUDA_VISIBLE_DEVICES=N` for NVIDIA), restart
+ollama, then `get_system_resources` shows the pin and `recommend_model` sizes its memory budget
+against *that* GPU instead of the roomiest one.
 
 Quick single-provider env mode (no config file): `LOCAL_LLM_BASE_URL`, `LOCAL_LLM_API_KEY_ENV`,
 `LOCAL_LLM_MODEL`, `LOCAL_LLM_PROVIDER_TYPE`.

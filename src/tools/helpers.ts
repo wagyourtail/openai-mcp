@@ -1,5 +1,27 @@
 import { recordDelegatedBytes, recordUsage, type ToolUsage } from "../lib/usage.ts";
 import type { ChatRequest, ChatResult, Provider } from "../providers/index.ts";
+import { z } from "zod";
+
+/** Generation params shared by all local-LLM tool schemas; forwarded onto ChatRequest. */
+export const GEN_PARAMS = {
+  think: z
+    .union([z.boolean(), z.enum(["low", "medium", "high"])])
+    .optional()
+    .describe(
+      "Chain-of-thought control (ollama `think`; best-effort on openai-compatible servers). " +
+        "think:false keeps the whole max_tokens budget for the answer.",
+    ),
+  top_p: z.number().optional().describe("Nucleus sampling threshold."),
+  seed: z.number().int().optional().describe("Fixed seed for reproducible output."),
+  stop: z.array(z.string()).optional().describe("Stop sequences."),
+  options: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      "Provider-native overrides merged into the request (ollama `options` keys like " +
+        "top_k/repeat_penalty; openai-compatible body fields). Wins over named params.",
+    ),
+};
 
 let requestTimeoutMs = 300_000;
 

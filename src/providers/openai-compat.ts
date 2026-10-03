@@ -80,7 +80,20 @@ export class OpenAICompatProvider implements Provider {
       messages: req.messages.map(toWire),
       temperature: req.temperature ?? this.cfg.temperature,
       max_tokens: req.max_tokens,
+      top_p: req.top_p,
+      seed: req.seed,
+      stop: req.stop,
     };
+    const think = req.think ?? this.cfg.think;
+    if (think === false) {
+      // vLLM / llama.cpp convention for disabling a model's reasoning pass.
+      body.chat_template_kwargs = { enable_thinking: false };
+    } else if (typeof think === "string") {
+      body.reasoning_effort = think;
+    }
+    // Provider-native escape hatches; request-level options win over config.
+    Object.assign(body, this.cfg.options, req.options);
+    for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
     if (req.tools?.length) {
       body.tools = req.tools.map((t: ToolSpec) => ({
         type: "function",

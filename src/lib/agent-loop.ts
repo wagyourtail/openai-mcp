@@ -38,6 +38,8 @@ export async function runAgentLoop(params: {
   maxSteps: number;
   temperature?: number;
   numCtx?: number;
+  think?: boolean | "low" | "medium" | "high";
+  options?: Record<string, unknown>;
   timeoutS: number;
   toolResultChars: number;
   onProgress?: (info: { step: number; note: string }) => void;
@@ -95,6 +97,8 @@ export async function runAgentLoop(params: {
         tools: specs.length ? specs : undefined,
         temperature: params.temperature ?? 0.2,
         num_ctx: params.numCtx,
+        think: params.think,
+        options: params.options,
         signal: params.signal
           ? AbortSignal.any([AbortSignal.timeout(Math.max(1000, deadline - Date.now())), params.signal])
           : AbortSignal.timeout(Math.max(1000, deadline - Date.now())),

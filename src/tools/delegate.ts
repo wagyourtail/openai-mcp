@@ -27,6 +27,8 @@ interface DelegateParams {
   num_ctx?: number;
   max_steps?: number;
   temperature?: number;
+  think?: boolean | "low" | "medium" | "high";
+  options?: Record<string, unknown>;
   timeout_s?: number;
   verify?: "none" | "self";
 }
@@ -93,6 +95,8 @@ async function doDelegate(
     maxSteps: Math.min(p.max_steps ?? limits.max_steps, limits.max_steps),
     temperature: p.temperature,
     numCtx: effectiveNumCtx,
+    think: p.think,
+    options: p.options,
     timeoutS: p.timeout_s ?? limits.agent_timeout_s,
     toolResultChars: limits.max_tool_result_chars,
     onProgress: ({ step, note }) => report(note, step),
@@ -131,6 +135,8 @@ async function doDelegate(
       model: m,
       temperature: 0,
       num_ctx: p.num_ctx,
+      think: p.think,
+      options: p.options,
       messages: [
         { role: "system", content: 'You verify another model\'s work. Reply with JSON: {"verdict":"ok"|"suspect","reason":"one line"}' },
         { role: "user", content: `Task: ${p.task}\n\nProduced result:\n${result.finalAnswer}\n\nStaged ops: ${newOps.map((o) => `${o.id}:${o.path}`).join(", ") || "none"}` },
@@ -185,6 +191,11 @@ export function registerDelegateTools(server: McpServer, ctx: ServerContext): vo
         num_ctx: z.number().int().optional().describe("Context window for the local model (ollama only). Smaller = less VRAM."),
         max_steps: z.number().int().optional(),
         temperature: z.number().optional(),
+        think: z
+          .union([z.boolean(), z.enum(["low", "medium", "high"])])
+          .optional()
+          .describe("Chain-of-thought control for the agent's model (ollama `think`). think:false leaves more context/steps for tool calls on thinking models."),
+        options: z.record(z.string(), z.unknown()).optional().describe("Provider-native request overrides (ollama `options` keys / openai body fields)."),
         timeout_s: z.number().int().optional(),
         verify: z.enum(["none", "self"]).optional().describe('"self" = a second local pass critiques the result and flags it needs_review if it looks wrong.'),
         run_async: z.boolean().optional().describe("true = run as a background job; returns job_id immediately, poll get_job for progress + result. false = synchronous, but if the task outlasts config agent_sync_grace_ms the call returns a job_id so the result is never lost. Default: config agent_async."),

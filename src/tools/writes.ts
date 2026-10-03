@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
+import { GEN_PARAMS, jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite } from "../lib/staging.ts";
 import { patchConfig } from "../config.ts";
 
@@ -20,9 +20,10 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         model: z.string().optional(),
         provider: z.string().optional(),
         num_ctx: z.number().int().optional(),
+        ...GEN_PARAMS,
       },
     },
-    async ({ path, instruction, model, provider: pName, num_ctx }, extra) => {
+    async ({ path, instruction, model, provider: pName, num_ctx, ...gen }, extra) => {
       const report = makeProgress(extra as ProgressExtra);
       const { provider, model: m } = pickModel(ctx, pName, model);
       report(`generating: ${path}`);
@@ -38,6 +39,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         model: m,
         temperature: 0.2,
         num_ctx,
+        ...gen,
         messages: [
           { role: "system", content: `You rewrite files. Instruction: ${instruction}\nReturn ONLY the complete new file content — no markdown fences, no commentary.` },
           { role: "user", content: `File: ${path}\n\n${content}` },
