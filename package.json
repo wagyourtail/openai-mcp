@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "MCP server that gives an agent a local subagent: offload low-complexity work to a small model on Ollama (or any OpenAI-compatible endpoint) without burning frontier tokens",
   "type": "module",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "start": "node src/index.ts",
