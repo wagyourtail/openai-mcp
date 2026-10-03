@@ -1,0 +1,68 @@
+{
+  "default_provider": "local",
+  "providers": {
+    "local": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "default_model": "llama3.1:8b",
+      "num_ctx": 16384,
+      "temperature": 0.2,
+      "keep_alive": "5m"
+    },
+    "lmstudio": {
+      "type": "openai",
+      "base_url": "http://localhost:1234/v1",
+      "default_model": "qwen2.5-coder-7b-instruct"
+    },
+    "remote-ollama": {
+      "type": "ollama",
+      "base_url": "http://192.168.1.50:11434",
+      "default_model": "llama3.1:8b"
+    }
+  },
+  "trust_cwd": true,
+  "allowed_roots": [
+    "/home/william/repos"
+  ],
+  "deny_globs": [
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa*",
+    "**/id_ed25519*",
+    "**/.ssh/**",
+    "**/secrets/**"
+  ],
+  "command_whitelist": {
+    "enabled": true,
+    "commands": {
+      "rg": { "allow_args": null },
+      "grep": { "allow_args": null },
+      "ls": { "allow_args": null },
+      "cat": { "allow_args": null },
+      "head": { "allow_args": null },
+      "tail": { "allow_args": null },
+      "wc": { "allow_args": null },
+      "sort": { "allow_args": null },
+      "uniq": { "allow_args": null },
+      "find": { "allow_args": null },
+      "file": { "allow_args": null },
+      "stat": { "allow_args": null },
+      "jq": { "allow_args": null },
+      "git": { "allow_args": ["status", "log", "diff", "show", "grep", "ls-files", "rev-parse", "branch"] }
+    }
+  },
+  "limits": {
+    "max_read_bytes": 524288,
+    "max_steps": 12,
+    "agent_timeout_s": 120,
+    "stage_ttl_s": 1800,
+    "max_tool_result_chars": 8000,
+    "max_map_files": 50,
+    "max_glob_matches": 500,
+    "run_command_timeout_s": 30,
+    "run_command_output_chars": 8000,
+    "num_ctx": 16384
+  }
+}
