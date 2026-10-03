@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import type { FsGuard } from "./fs-guard.ts";
@@ -25,6 +25,8 @@ export interface CommittedOp {
   oldContent: string;
   committedContent: string;
   committedAt: number;
+  /** False when the commit created the file — uncommit deletes it. */
+  existedBefore: boolean;
   summary?: string;
 }
 
@@ -130,6 +132,7 @@ export async function commitOp(
     oldContent: op.oldContent,
     committedContent: op.newContent,
     committedAt: Date.now(),
+    existedBefore: op.existedBefore,
     summary,
   };
   history.set(commit.id, commit);
@@ -169,4 +172,46 @@ export function revertCommit(guard: FsGuard, commitId: string, ttlMs: number): S
     ttlMs,
   );
   return op;
+}
+
+/**
+ * Immediately restore a committed write's pre-commit content — the one-call
+ * undo (revert_write is the staged/reviewed equivalent). Files the commit
+ * created are deleted. Refuses on drift unless force=true. The undo is itself
+ * recorded as a commit, so it can be reverted in turn.
+ */
+export async function uncommitOp(
+  guard: FsGuard,
+  commitId: string,
+  force = false,
+): Promise<{ path: string; commitId: string; deleted: boolean; drifted: boolean }> {
+  const commit = history.get(commitId);
+  if (!commit) throw new Error(`no committed op ${commitId} (history keeps last ${MAX_HISTORY})`);
+  const p = guard.resolve(commit.path);
+  const current = existsSync(p) ? readFileSync(p, "utf-8") : "";
+  const drifted = sha256(current) !== sha256(commit.committedContent);
+  if (drifted && !force) {
+    throw new Error(
+      `file changed after the commit: ${p}. Refusing to clobber later edits — pass force=true to restore anyway.`,
+    );
+  }
+  const existedBefore = commit.existedBefore ?? true; // pre-field commits: assume it existed
+  if (existedBefore) {
+    const tmp = `${p}.openai-mcp-${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, commit.oldContent, "utf-8");
+    await rename(tmp, p);
+  } else {
+    await unlink(p).catch(() => {});
+  }
+  const undo: CommittedOp = {
+    id: `commit_${randomBytes(8).toString("hex")}`,
+    path: p,
+    oldContent: commit.committedContent,
+    committedContent: commit.oldContent,
+    committedAt: Date.now(),
+    existedBefore: true, // after uncommit the file is back (or recreated by a redo)
+    summary: `uncommit of ${commitId}${commit.summary ? ` (${commit.summary})` : ""}`,
+  };
+  history.set(undo.id, undo);
+  return { path: p, commitId: undo.id, deleted: !existedBefore, drifted };
 }

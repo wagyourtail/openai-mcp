@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
 import { GEN_PARAMS, jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
-import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite } from "../lib/staging.ts";
+import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite, uncommitOp } from "../lib/staging.ts";
 import { patchConfig } from "../config.ts";
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
@@ -198,6 +198,36 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         needs_review: op.needsReview,
         note: op.reviewNote,
         diff: op.diff,
+      });
+    },
+  );
+
+  server.registerTool(
+    "uncommit_write",
+    {
+      description:
+        "One-call undo of a committed write — restores the pre-commit content atomically " +
+        "(deletes files the commit created), no re-staging/re-commit needed. Refuses if the " +
+        "file changed since the commit unless force:true. Requires write_mode 'write' — in " +
+        "'propose' mode use revert_write + commit_write for the reviewed path.",
+      inputSchema: {
+        commit_id: z.string(),
+        force: z.boolean().optional().describe("Restore even though the file drifted since the commit"),
+      },
+    },
+    async ({ commit_id, force }) => {
+      if (ctx.writeMode !== "write") {
+        throw new Error(
+          "write_mode is 'propose' — the server can't write disk. Use revert_write(commit_id) to stage the undo, then commit_write it.",
+        );
+      }
+      const r = await uncommitOp(ctx.guard, commit_id, force ?? false);
+      return jsonResult({
+        uncommitted: r.path,
+        deleted: r.deleted,
+        drifted: r.drifted,
+        undo_commit_id: r.commitId,
+        note: "The undo is itself a commit — uncommit_write(undo_commit_id) redoes the original write.",
       });
     },
   );

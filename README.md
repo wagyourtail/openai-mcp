@@ -100,7 +100,8 @@ In `~/.config/devin/config.json`:
               "mcp__local_llm__pull_model", "mcp__local_llm__download_model",
               "mcp__local_llm__delete_model", "mcp__local_llm__prune_models",
               "mcp__local_llm__register_tool", "mcp__local_llm__unregister_tool",
-              "mcp__local_llm__update_command_whitelist", "mcp__local_llm__unload_model"]
+              "mcp__local_llm__update_command_whitelist", "mcp__local_llm__unload_model",
+              "mcp__local_llm__uncommit_write"]
   }
 }
 ```
@@ -120,7 +121,7 @@ In `~/.config/devin/config.json`:
 | `propose_write` | Local model rewrites/creates one file → staged diff. |
 | `list_staged` / `get_diff` / `commit_write` / `discard_write` | Staged-write lifecycle. **Nothing the local model writes reaches disk without `commit_write`.** Commit refuses if the file drifted since staging (`force=true` overrides) — and entirely while `write_mode` is `propose`. `commit_write` requires `path` + `summary` args so the approval prompt shows *what* is being written, not just an opaque op id; the `path` is verified against the staged op. |
 | `set_write_mode` | `propose` (default): server stages diffs only; Devin applies via its own edit tools (`get_diff include_content` for full content). `write`: `commit_write` writes to disk. `persist:true` saves to config. |
-| `list_commits` / `revert_write` | Undo: `revert_write(commit_id)` stages a revert op restoring pre-commit content. |
+| `list_commits` / `revert_write` / `uncommit_write` | Undo: `revert_write(commit_id)` stages a revert op (reviewed path); `uncommit_write(commit_id)` restores pre-commit content immediately in `write` mode (deletes files the commit created; drift-checked). |
 | `list_models` | Models per provider (sizes, capabilities, last-modified). |
 | `get_system_resources` | RAM + VRAM + loaded models (local ollama only). `ollama_gpu` reports which GPU(s) the server is pinned to (env vars) or observed using (runner process device fds). |
 | `recommend_model` | Rank installed models vs detected memory budget (pinned/observed GPU > discrete GPU > RAM) with three-way `fit` verdicts (`yes`/`marginal`/`no`). `apply:true` writes `default_model` to config and applies live; `model:"x:y"` + `apply:true` sets an explicit default. |
