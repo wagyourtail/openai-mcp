@@ -39,6 +39,7 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
         description: "Read a UTF-8 text file. Returns file contents (truncated if very large).",
         parameters: OBJ({ path: { type: "string", description: "Path to the file" } }, ["path"]),
       },
+      delegates: true,
       async execute(args) {
         const { content, truncated, bytes } = await guard.readFile(String(args.path));
         return (truncated ? `[file truncated at ${bytes} bytes]\n` : "") + content;
@@ -69,6 +70,7 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
           ["pattern"],
         ),
       },
+      delegates: true,
       async execute(args) {
         const target = args.path ? guard.resolve(String(args.path)) : guard.rootList[0];
         const argv = ["--line-number", "--no-heading", "--color=never", "-e", String(args.pattern)];

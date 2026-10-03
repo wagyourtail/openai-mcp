@@ -56,6 +56,10 @@ export const ConfigSchema = z.object({
     })
     .default({ enabled: true, commands: {} }),
   write_mode: z.enum(["propose", "write"]).default("propose"),
+  /** When true, run_local_agent runs as a background job unless run_async is explicitly false. */
+  agent_async: z.boolean().default(false),
+  /** How long a synchronous run_local_agent call waits before returning a job_id instead of the result. */
+  agent_sync_grace_ms: z.number().int().positive().default(45_000),
   limits: LimitsSchema.default({}),
 });
 

@@ -12,6 +12,13 @@ test("ConfigSchema fills defaults", () => {
   assert.deepEqual(c.allowed_roots, []);
   assert.ok(c.deny_globs.includes("**/.env"));
   assert.equal(c.limits.num_ctx, 16384);
+  assert.equal(c.agent_async, false);
+  assert.equal(c.agent_sync_grace_ms, 45_000);
+});
+
+test("agent_async parses from config", () => {
+  const c = ConfigSchema.parse({ agent_async: true });
+  assert.equal(c.agent_async, true);
 });
 
 test("missing config yields default ollama provider", () => {

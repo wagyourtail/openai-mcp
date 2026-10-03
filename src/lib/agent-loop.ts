@@ -1,8 +1,10 @@
-import type { ChatMessage, Provider, ToolSpec, Usage } from "../providers/index.ts";
+import type { ChatMessage, Provider, ToolCall, ToolSpec, Usage } from "../providers/index.ts";
 import type { JobControl } from "./jobs.ts";
 
 export interface LocalTool {
   spec: ToolSpec;
+  /** Results are file content — count them toward delegated_bytes. */
+  delegates?: boolean;
   execute(args: Record<string, unknown>): Promise<string>;
 }
 
@@ -16,6 +18,8 @@ export interface AgentLoopResult {
   finalAnswer: string;
   steps: StepRecord[];
   usage: Usage & { calls: number };
+  /** Bytes of file content returned by tools flagged `delegates`. */
+  delegatedBytes: number;
   aborted?: string;
 }
 
@@ -51,6 +55,7 @@ export async function runAgentLoop(params: {
   const specs = params.tools.map((t) => t.spec);
   const steps: StepRecord[] = [];
   const usage = { promptTokens: 0, completionTokens: 0, calls: 0 };
+  let delegatedBytes = 0;
   const callCounts = new Map<string, number>();
   const deadline = Date.now() + params.timeoutS * 1000;
 
@@ -59,6 +64,7 @@ export async function runAgentLoop(params: {
     finalAnswer: lastAssistantContent(messages),
     steps,
     usage,
+    delegatedBytes,
     ...extra,
   });
 
@@ -103,11 +109,19 @@ export async function runAgentLoop(params: {
     usage.completionTokens += res.usage.completionTokens;
     usage.calls++;
 
-    if (res.toolCalls.length === 0) {
-      return { finalAnswer: res.content, steps, usage };
+    // Small models sometimes emit the tool call as JSON text in content rather
+    // than the structured tool_calls field (e.g. qwen2.5-coder on older Ollama).
+    const toolCalls =
+      res.toolCalls.length > 0
+        ? res.toolCalls
+        : specs.length
+          ? salvageToolCalls(res.content, toolMap)
+          : [];
+    if (toolCalls.length === 0) {
+      return { finalAnswer: res.content, steps, usage, delegatedBytes };
     }
 
-    messages.push({ role: "assistant", content: res.content, tool_calls: res.toolCalls });
+    messages.push({ role: "assistant", content: res.content, tool_calls: toolCalls });
     const record: StepRecord = {
       step,
       toolCalls: [],
@@ -115,7 +129,7 @@ export async function runAgentLoop(params: {
     };
 
     let abort: string | undefined;
-    for (const tc of res.toolCalls) {
+    for (const tc of toolCalls) {
       const sig = `${tc.name}(${stableJson(tc.arguments)})`;
       const n = (callCounts.get(sig) ?? 0) + 1;
       callCounts.set(sig, n);
@@ -137,6 +151,7 @@ export async function runAgentLoop(params: {
           ok = false;
         }
       }
+      if (ok && tool?.delegates) delegatedBytes += Buffer.byteLength(result, "utf8");
       const truncated =
         result.length > params.toolResultChars
           ? result.slice(0, params.toolResultChars) + `\n...[truncated ${result.length - params.toolResultChars} chars]`
@@ -150,15 +165,67 @@ export async function runAgentLoop(params: {
       note: `step ${step}: ${record.toolCalls.map((t) => t.name).join(", ") || "final answer"}`,
     });
     if (abort) {
-      return { finalAnswer: lastAssistantContent(messages), steps, usage, aborted: abort };
+      return finish({ aborted: abort });
     }
   }
-  return {
-    finalAnswer: lastAssistantContent(messages),
-    steps,
-    usage,
-    aborted: `max_steps (${params.maxSteps}) reached`,
-  };
+  return finish({ aborted: `max_steps (${params.maxSteps}) reached` });
+}
+
+/**
+ * Small models (notably qwen2.5-coder on older Ollama) sometimes emit a tool
+ * call as plain JSON text instead of the structured tool_calls field. Salvage
+ * it by parsing content for {name, arguments} shapes — but only when `name`
+ * matches a registered tool, so a real answer that happens to be JSON isn't
+ * hijacked into a spurious call.
+ */
+export function salvageToolCalls(content: string, tools: Map<string, LocalTool>): ToolCall[] {
+  const candidates: string[] = [];
+  for (const m of content.matchAll(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi)) {
+    candidates.push(m[1]);
+  }
+  let body = content.trim();
+  const fence = body.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+  if (fence) body = fence[1].trim();
+  if (candidates.length === 0 && (body.startsWith("{") || body.startsWith("["))) {
+    candidates.push(body);
+  }
+  const out: ToolCall[] = [];
+  for (const cand of candidates) {
+    let v: unknown;
+    try {
+      v = JSON.parse(cand);
+    } catch {
+      continue;
+    }
+    for (const item of Array.isArray(v) ? v : [v]) {
+      const tc = asToolCall(item);
+      if (tc && tools.has(tc.name)) {
+        out.push({ id: `salvaged_${out.length}`, name: tc.name, arguments: tc.arguments });
+      }
+    }
+  }
+  return out;
+}
+
+/** Coerce {name, arguments} / {name, parameters} / {function:{name, arguments}} into a ToolCall shape. */
+function asToolCall(v: unknown): { name: string; arguments: Record<string, unknown> } | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const fn =
+    o.function && typeof o.function === "object" && !Array.isArray(o.function)
+      ? (o.function as Record<string, unknown>)
+      : o;
+  if (typeof fn.name !== "string" || !fn.name) return null;
+  let args: unknown = fn.arguments ?? fn.parameters ?? {};
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = {};
+    }
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) args = {};
+  return { name: fn.name, arguments: args as Record<string, unknown> };
 }
 
 function lastAssistantContent(messages: ChatMessage[]): string {

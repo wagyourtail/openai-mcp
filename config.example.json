@@ -22,7 +22,7 @@
   },
   "trust_cwd": true,
   "allowed_roots": [
-    "/home/william/repos"
+    "/path/to/extra/repos"
   ],
   "deny_globs": [
     "**/.env",

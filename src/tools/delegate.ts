@@ -2,7 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
-import { jsonResult, makeProgress, recordDelegatedBytes, trackedChat, type ProgressExtra } from "./helpers.ts";
+import { jsonResult, makeProgress, trackedChat, withTimeout, type ProgressExtra } from "./helpers.ts";
+import { recordUsage } from "../lib/usage.ts";
 import { runAgentLoop, type LocalTool } from "../lib/agent-loop.ts";
 import { buildLocalTools } from "../lib/local-tools.ts";
 import { listOps } from "../lib/staging.ts";
@@ -100,6 +101,7 @@ async function doDelegate(
   });
   const newOps = listOps().filter((o) => !opsBefore.has(o.id));
 
+  delegated += result.delegatedBytes; // file content the agent's own tools read
   const usage = {
     provider: provider.name,
     model: m,
@@ -108,7 +110,18 @@ async function doDelegate(
     llmCalls: result.usage.calls,
     elapsedMs: Date.now() - t0,
   };
-  recordDelegatedBytes("run_local_agent", delegated);
+  recordUsage(
+    "run_local_agent",
+    {
+      provider: provider.name,
+      model: m,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      elapsedMs: usage.elapsedMs,
+    },
+    delegated,
+    usage.llmCalls,
+  );
 
   // Optional cheap self-verification pass.
   let verification: Record<string, unknown> | undefined;
@@ -174,34 +187,45 @@ export function registerDelegateTools(server: McpServer, ctx: ServerContext): vo
         temperature: z.number().optional(),
         timeout_s: z.number().int().optional(),
         verify: z.enum(["none", "self"]).optional().describe('"self" = a second local pass critiques the result and flags it needs_review if it looks wrong.'),
-        run_async: z.boolean().optional().describe("true = run as a background job; returns job_id immediately, poll get_job for progress + result. For long tasks."),
+        run_async: z.boolean().optional().describe("true = run as a background job; returns job_id immediately, poll get_job for progress + result. false = synchronous, but if the task outlasts config agent_sync_grace_ms the call returns a job_id so the result is never lost. Default: config agent_async."),
       },
     },
     async (params, extra) => {
       const report = makeProgress(extra as ProgressExtra, params.max_steps);
-      if (params.run_async) {
-        const job = createJob("run_local_agent");
-        updateJob(job.id, { task: params.task.slice(0, 200) });
-        const ac = new AbortController();
-        job.abort = () => ac.abort();
-        void doDelegate(
-          ctx,
-          params,
-          (msg, n) => {
-            updateJob(job.id, { step: n, last: msg });
-            report(msg, n);
-          },
-          job.control,
-          ac.signal,
-        )
-          .then((r) => finishJob(job.id, undefined, r))
-          .catch((e) => finishJob(job.id, e instanceof Error ? e.message : String(e)));
-        return jsonResult({
+      const job = createJob("run_local_agent");
+      updateJob(job.id, { task: params.task.slice(0, 200) });
+      const ac = new AbortController();
+      job.abort = () => ac.abort();
+      const run = doDelegate(
+        ctx,
+        params,
+        (msg, n) => {
+          updateJob(job.id, { step: n, last: msg });
+          report(msg, n);
+        },
+        job.control,
+        ac.signal,
+      ).then(
+        (r) => {
+          finishJob(job.id, undefined, r);
+          return { ok: true as const, result: r };
+        },
+        (e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          finishJob(job.id, msg);
+          return { ok: false as const, error: msg };
+        },
+      );
+      const jobRef = () =>
+        jsonResult({
           job_id: job.id,
-          note: "Async — poll get_job(job_id) for progress; result lands in job.result. Steer it with control_job (pause/resume/cancel/inject).",
+          note: "Poll get_job(job_id) for progress; result lands in job.result. Steer it with control_job (pause/resume/cancel/inject).",
         });
-      }
-      return jsonResult(await doDelegate(ctx, params, report));
+      if (params.run_async ?? ctx.config.agent_async) return jobRef();
+      const out = await withTimeout(run, ctx.config.agent_sync_grace_ms);
+      if (out === "timeout") return jobRef();
+      if (!out.ok) throw new Error(out.error);
+      return jsonResult(out.result);
     },
   );
 }

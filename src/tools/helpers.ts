@@ -74,6 +74,11 @@ export function makeProgress(extra: ProgressExtra, total?: number) {
   };
 }
 
+/** Resolve `p`, or "timeout" if `ms` elapses first. `p` keeps running either way. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | "timeout"> {
+  return Promise.race([p, new Promise<"timeout">((res) => setTimeout(() => res("timeout"), ms))]);
+}
+
 /** Run `fn` over items with a concurrency cap; preserves input order in results. */
 export async function pool<T, R>(items: T[], concurrency: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);

@@ -24,13 +24,13 @@ const stats: SessionStats = {
   startedAt: new Date().toISOString(),
 };
 
-export function recordUsage(tool: string, u: ToolUsage, delegatedBytes = 0): void {
-  stats.calls++;
+export function recordUsage(tool: string, u: ToolUsage, delegatedBytes = 0, calls = 1): void {
+  stats.calls += calls;
   stats.promptTokens += u.promptTokens;
   stats.completionTokens += u.completionTokens;
   stats.delegatedBytes += delegatedBytes;
   const t = (stats.byTool[tool] ??= { calls: 0, promptTokens: 0, completionTokens: 0, delegatedBytes: 0 });
-  t.calls++;
+  t.calls += calls;
   t.promptTokens += u.promptTokens;
   t.completionTokens += u.completionTokens;
   t.delegatedBytes += delegatedBytes;

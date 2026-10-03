@@ -55,6 +55,14 @@ test("glob expands over roots and respects deny_globs", async () => {
   assert.ok(!envs.some((p) => p.endsWith(".env")));
 });
 
+test("glob anchors relative patterns to each root", async () => {
+  const { guard } = fixture();
+  const hits = await guard.glob("src/**/*.ts", 100);
+  assert.equal(hits.length, 2);
+  const shallow = await guard.glob("*.md", 100);
+  assert.equal(shallow.length, 1);
+});
+
 test("empty roots disables fs access with clear error", () => {
   const guard = new FsGuard([], [], 1024);
   assert.throws(() => guard.resolve("/tmp/x"), /no roots available/);

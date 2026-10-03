@@ -253,6 +253,8 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         flags: {
           run_command: ctx.env.runCommand,
           dynamic_tools: ctx.env.dynamicTools,
+          agent_async: ctx.config.agent_async,
+          agent_sync_grace_ms: ctx.config.agent_sync_grace_ms,
         },
         command_whitelist: {
           enabled: ctx.config.command_whitelist.enabled,

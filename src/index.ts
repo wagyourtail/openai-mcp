@@ -38,8 +38,9 @@ PRAGMATIC WRITE WORKFLOW:
   the batch (it belongs in ask-permissions), review a SAMPLE of diffs with
   get_diff, commit_write the batch, then revert_write anything bad. Set it back
   to "propose" when done.
-- Long delegations: run_async:true, then steer with control_job — inject
-  corrections mid-flight, pause to think, cancel a runaway — instead of blocking.
+- Long delegations: sync calls that outlast agent_sync_grace_ms return a job_id
+  (poll get_job) instead of losing the result; run_async:true skips the wait.
+  Steer with control_job — inject corrections mid-flight, pause, or cancel.
 
 INPUT-SIZING:
 - Prefer \`paths\` (agent reads on demand) over \`files\` (inlined) for anything

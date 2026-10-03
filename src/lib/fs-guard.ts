@@ -154,17 +154,22 @@ export class FsGuard {
     };
   }
 
-  /** Expand `**`-aware glob over the allowed roots. Returns absolute paths. */
+  /**
+   * Expand `**`-aware glob over the allowed roots. Returns absolute paths.
+   * Relative patterns are anchored to each root (walk only visits paths inside
+   * roots, so `../` can never escape); absolute patterns match full paths.
+   */
   async glob(pattern: string, maxMatches: number): Promise<string[]> {
     if (!this.configured) {
       throw new Error(
         "filesystem access is disabled: no roots available (config/MCP-roots/cwd all empty).",
       );
     }
-    const re = globToRegExp(expandHome(pattern));
+    const expanded = expandHome(pattern);
     const out: string[] = [];
     for (const root of this.roots.keys()) {
       if (out.length >= maxMatches) break;
+      const re = globToRegExp(isAbsolute(expanded) ? expanded : resolve(root, expanded));
       await walk(root, re, out, maxMatches);
     }
     const filtered = out.filter((p) => !matchesAny(p, this.denyRe));

@@ -50,9 +50,9 @@ everywhere. `get_server_info` shows each root with its source.
   "mcpServers": {
     "local_llm": {
       "command": "node",
-      "args": ["/home/william/Documents/openai-mcp/src/index.ts"],
+      "args": ["/path/to/openai-mcp/src/index.ts"],
       "env": {
-        "LOCAL_LLM_CONFIG": "/home/william/.config/openai-mcp/config.json",
+        "LOCAL_LLM_CONFIG": "~/.config/openai-mcp/config.json",
         "LOCAL_LLM_RUN_COMMAND": "1",
         "LOCAL_LLM_DYNAMIC_TOOLS": "1"
       }
@@ -61,7 +61,7 @@ everywhere. `get_server_info` shows each root with its source.
 }
 ```
 
-CLI equivalent: `devin mcp add -s user local_llm -- node /home/william/Documents/openai-mcp/src/index.ts`
+CLI equivalent: `devin mcp add -s user local_llm -- node /path/to/openai-mcp/src/index.ts`
 
 Omit the two `LOCAL_LLM_*` env flags to disable shell access and dynamic tools entirely.
 
@@ -96,7 +96,7 @@ In `~/.config/devin/config.json`:
 
 | Tool | What it does |
 |---|---|
-| `run_local_agent` | **Local subagent.** Small model runs its own tool loop; returns final answer + staged op ids. `verify:"self"` adds a critique pass. `run_async:true` runs it as a background job (poll `get_job`). |
+| `run_local_agent` | **Local subagent.** Small model runs its own tool loop; returns final answer + staged op ids. `verify:"self"` adds a critique pass. Sync calls wait up to `agent_sync_grace_ms` (default 45s), then return a `job_id` instead of losing the result; `run_async:true` skips the wait and returns a job immediately (poll `get_job`). |
 | `chat` / `complete` | Raw completions passthrough. |
 | `summarize` | Summarize files/globs server-side; only summaries return. |
 | `extract` | Structured JSON extraction, optional schema validation + retry. |
@@ -124,9 +124,11 @@ Two free/cheap progress channels:
 - **MCP `notifications/progress`**: `run_local_agent` reports each agent step and `map_files`
   reports per-file completion — *if* the client attaches a `progressToken`. These go to client UI
   plumbing, **not into the model context — zero token cost.**
-- **Job polling**: `run_async:true` on `run_local_agent` (and `pull_model`/`download_model`) returns
-  a `job_id`; `get_job` shows live progress + the final `result`. Polling costs a few tokens per
-  call, but only when Devin chooses to check.
+- **Job polling**: every `run_local_agent` call runs under a job. `run_async:true` returns the
+  `job_id` immediately; sync calls return the inline result if they finish within
+  `agent_sync_grace_ms`, otherwise the `job_id`. `get_job` shows live progress + the final
+  `result`. Polling costs a few tokens per call, but only when Devin chooses to check.
+  (`pull_model`/`download_model` are always jobs.)
 
 ## Safety model
 
