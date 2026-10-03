@@ -28,6 +28,43 @@ test("rankModels prefers fitting tool-capable models, biggest first", () => {
   assert.equal(ranked[2].fits, false);
 });
 
+test("rankModels marks blob-fits-but-tight models marginal, not excluded", () => {
+  // gemma4:e2b ~4.6GB blob vs 5018MB budget: blob fits, 1.25x est doesn't.
+  const budget = 5018 * 1024 * 1024;
+  const ranked = rankModels(
+    [
+      { id: "marginal:5b", sizeBytes: 4.6 * GB, parameterSize: "5B", capabilities: ["tools"] },
+      { id: "huge:26b", sizeBytes: 23 * GB },
+    ],
+    budget,
+  );
+  assert.equal(ranked[0].fit, "marginal");
+  assert.equal(ranked[0].fits, true); // marginal still counts as usable
+  assert.equal(ranked[1].fit, "no");
+  assert.equal(ranked[1].fits, false);
+});
+
+test("pruneCandidates honors maxAgeDays and unusedDays", () => {
+  const day = 86400_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const ms: ModelInfo[] = [
+    { id: "old:7b", sizeBytes: 5 * GB, modifiedAt: iso(Date.now() - 60 * day) },
+    { id: "new:7b", sizeBytes: 5 * GB, modifiedAt: iso(Date.now() - 2 * day) },
+    { id: "recent-use:7b", sizeBytes: 5 * GB, modifiedAt: iso(Date.now() - 90 * day) },
+    { id: "no-record:7b", sizeBytes: 5 * GB, modifiedAt: iso(Date.now() - 90 * day) },
+  ];
+  const plan = pruneCandidates(ms, {
+    maxAgeDays: 30,
+    unusedDays: 30,
+    lastUsed: { "recent-use:7b": iso(Date.now() - 5 * day), "old:7b": iso(Date.now() - 45 * day) },
+  });
+  assert.deepEqual(plan.candidates.map((c) => c.id), ["old:7b"]);
+  assert.ok(plan.kept.some((k) => k.id === "new:7b" && k.reason.includes("modified within")));
+  assert.ok(plan.kept.some((k) => k.id === "recent-use:7b" && k.reason.includes("used within")));
+  // no usage record -> treated as used, never pruned by unused_days
+  assert.ok(plan.kept.some((k) => k.id === "no-record:7b" && k.reason.includes("no recorded usage")));
+});
+
 test("rankModels with zero budget ranks everything as fitting", () => {
   const ranked = rankModels(models, 0);
   assert.equal(ranked[0].id, "big:14b"); // biggest tool-capable wins

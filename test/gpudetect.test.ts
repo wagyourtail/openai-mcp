@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   assignCards,
+  canonPci,
   normPci,
   parseEnvFile,
   parseOllamaJournal,
   parseSizeMB,
   parseSystemdShow,
+  procListGpuSlots,
   resolvePinnedSlots,
   type DrmCard,
   type GpuInfo,
@@ -134,7 +136,7 @@ test("filter_id lets pinned env resolve to the survivor's pci", () => {
 inference compute id=0 library=vulkan filter_id=2 name=Vulkan0 description="Arc A380" pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`;
   const { env, devices } = parseOllamaJournal(log);
   const r = resolvePinnedSlots(env, devices, []);
-  assert.deepEqual(r.slots, ["04:00.0"]);
+  assert.deepEqual(r.slots, ["0000:04:00.0"]);
 });
 
 test("resolvePinnedSlots maps GGML_VK index through journal vulkan devices", () => {
@@ -145,7 +147,53 @@ test("resolvePinnedSlots maps GGML_VK index through journal vulkan devices", () 
   ];
   const r = resolvePinnedSlots({ GGML_VK_VISIBLE_DEVICES: "2" }, devices, []);
   assert.deepEqual(r.indices, [2]);
-  assert.deepEqual(r.slots, ["04:00.0"]);
+  assert.deepEqual(r.slots, ["0000:04:00.0"]);
+});
+
+test("resolvePinnedSlots returns canonical pci form", () => {
+  const devices: InferenceDevice[] = [
+    { index: 2, family: "vulkan", name: "A380", pci: "0000:04:00.0", totalMB: 0, availMB: 0 },
+  ];
+  const r = resolvePinnedSlots({ GGML_VK_VISIBLE_DEVICES: "2" }, devices, []);
+  assert.deepEqual(r.slots, ["0000:04:00.0"]); // canonical, matches gpu.pciSlot form
+});
+
+test("procListGpuSlots ignores sub-256MB probe contexts", () => {
+  // Live repro: Vulkan-pinned llama-server holds ~3.3MB of CUDA context on the
+  // P100 — that is a backend probe, not placement.
+  const gpus: GpuInfo[] = [
+    {
+      index: 0, vendor: "nvidia", pciSlot: "0000:01:00.0",
+      processes: [{ pid: 100, cmdline: "/usr/lib/ollama/llama-server --model x", memBytes: 3.3 * 1024 * 1024 }],
+    },
+    {
+      index: 1, vendor: "intel", pciSlot: "0000:04:00.0",
+      processes: [{ pid: 100, cmdline: "/usr/lib/ollama/llama-server --model x", memBytes: 3.5 * 1e9 }],
+    },
+  ];
+  assert.deepEqual(procListGpuSlots(gpus), ["0000:04:00.0"]);
+});
+
+test("procListGpuSlots counts unknown memBytes as real usage", () => {
+  const gpus: GpuInfo[] = [
+    {
+      index: 0, vendor: "nvidia", pciSlot: "0000:01:00.0",
+      processes: [{ pid: 7, cmdline: "llama-server", memBytes: undefined }],
+    },
+  ];
+  assert.deepEqual(procListGpuSlots(gpus), ["0000:01:00.0"]);
+});
+
+test("inference devices are marked as startup snapshots", () => {
+  const { devices } = parseOllamaJournal(
+    `inference compute id=0 filter_id=0 name=Vulkan0 pci_id=0000:04:00.0 total="5.9 GiB" available="4.9 GiB"`,
+  );
+  assert.equal(devices[0].asOf, "startup");
+});
+
+test("canonPci pads the domain", () => {
+  assert.equal(canonPci("04:00.0"), "0000:04:00.0");
+  assert.equal(canonPci("0000:04:00.0"), "0000:04:00.0");
 });
 
 test("resolvePinnedSlots falls back to vendor-sorted gpu list", () => {
@@ -154,5 +202,5 @@ test("resolvePinnedSlots falls back to vendor-sorted gpu list", () => {
     { index: 1, vendor: "intel", pciSlot: "0000:04:00.0" },
   ];
   const r = resolvePinnedSlots({ CUDA_VISIBLE_DEVICES: "0" }, [], gpus);
-  assert.deepEqual(r.slots, ["01:00.0"]);
+  assert.deepEqual(r.slots, ["0000:01:00.0"]);
 });

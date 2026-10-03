@@ -118,7 +118,8 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
       spec: {
         name: "run_command",
         description:
-          "Run a whitelisted command (no shell — argv only, no pipes/redirects). " +
+          "Run a whitelisted command (no shell — argv only: no pipes, redirects, or glob " +
+          "expansion; use list_dir/search_files instead of `ls *` patterns). " +
           `Whitelist: ${Object.keys(deps.whitelist.commands).join(", ")}`,
         parameters: OBJ(
           {

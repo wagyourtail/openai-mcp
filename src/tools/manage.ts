@@ -8,7 +8,7 @@ import { normPci, ollamaGpuPlacement, systemResources, type GpuInfo, type Ollama
 import { listRegistryTags, searchRegistry } from "../lib/registry.ts";
 import { pruneCandidates, rankModels } from "../lib/modelpick.ts";
 import { patchProvider } from "../config.ts";
-import { getStats } from "../lib/usage.ts";
+import { getStats, getModelUse } from "../lib/usage.ts";
 import { safeEnv } from "../lib/whitelist.ts";
 
 let hfCli: string | null | undefined;
@@ -90,7 +90,10 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
       const d = placement.inference_devices.find((x) => x.pci && normPci(x.pci) === normPci(g.pciSlot));
       if (!d) continue;
       g.totalMB ??= d.totalMB || undefined;
-      g.freeMB ??= d.availMB || undefined;
+      if (g.freeMB === undefined && d.availMB) {
+        g.freeMB = d.availMB;
+        g.freeSource = "journal-boot"; // startup snapshot — live free may be lower
+      }
     }
   }
 
@@ -326,7 +329,11 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         "config file AND applies it live to this server.",
       inputSchema: {
         provider: z.string().optional().describe("Provider name (default: default_provider)"),
-        apply: z.boolean().optional().describe("Persist the recommendation to config + apply it live"),
+        apply: z.boolean().optional().describe("Persist the pick to config + apply it live"),
+        model: z
+          .string()
+          .optional()
+          .describe("Explicit model to set as default with apply:true (must be installed; skips auto-pick)"),
         budget_mb: z
           .number()
           .int()
@@ -334,7 +341,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           .describe("Override the detected memory budget in MB (e.g. when sizing against a remote ollama host manually)"),
       },
     },
-    async ({ provider: pName, apply, budget_mb }) => {
+    async ({ provider: pName, apply, budget_mb, model: explicit }) => {
       const p = ctx.providers.get(pName);
       const models = await p.listModels();
       if (!models.length) throw new Error(`provider "${p.name}" reports no installed models`);
@@ -382,7 +389,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           const pinned = slots.length ? `pinned GPU ${slots.join(",")}` : `pinned GPU (env selector, pci unresolved)`;
           if (jAvail > 0) {
             budgetBytes = jAvail * 1024 * 1024;
-            budgetSource = `${pinned} free VRAM from ollama journal (nvtop/sysfs couldn't measure it)`;
+            budgetSource = `${pinned} free VRAM from ollama journal (boot-time snapshot — live free may be lower)`;
           } else if (tTotal > 0) {
             budgetBytes = tTotal * 1024 * 1024;
             budgetSource = `${pinned} TOTAL VRAM (free unknown — may overestimate)`;
@@ -402,8 +409,18 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         }
       }
       const ranked = rankModels(models, budgetBytes);
-      const best = ranked.find((r) => r.fits) ?? null;
+      let best: (typeof ranked)[number] | null = ranked.find((r) => r.fit === "yes") ?? null;
+      if (!best && ranked.find((r) => r.fit === "marginal")) {
+        best = ranked.find((r) => r.fit === "marginal")!;
+        warnings.push(`recommended model "${best.id}" is marginal — blob fits but KV/headroom is tight; expect partial CPU offload`);
+      }
       if (!best) warnings.push("no installed model fits the detected memory budget — pull a smaller model or free VRAM");
+      if (explicit) {
+        const norm = (id: string) => (id.includes(":") ? id : `${id}:latest`);
+        const hit = ranked.find((m) => norm(m.id) === norm(explicit));
+        if (!hit) throw new Error(`model "${explicit}" is not installed on provider "${p.name}" — pull_model it first`);
+        best = { ...hit, reason: `explicit pick (${hit.reason})` };
+      }
       const result: Record<string, unknown> = {
         provider: p.name,
         recommended: best?.id ?? null,
@@ -415,6 +432,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         ranked: ranked.map((r) => ({
           id: r.id,
           size_gb: r.sizeBytes ? Math.round(r.sizeBytes / 1e9 * 10) / 10 : undefined,
+          fit: r.fit,
           fits: r.fits,
           modified_at: r.modifiedAt,
           reason: r.reason,
@@ -473,15 +491,24 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
         dry_run: z.boolean().default(true),
         keep: z.array(z.string()).optional().describe("Model ids to never delete"),
         keep_recent: z.number().int().min(0).optional().describe("Also keep this many most-recently-modified models (default 0)"),
+        max_age_days: z.number().min(0).optional().describe("Keep models modified within the last N days"),
+        unused_days: z
+          .number()
+          .min(0)
+          .optional()
+          .describe("Keep models with a recorded inference within N days (uses the model-usage ledger; models with no record are kept)"),
       },
     },
-    async ({ provider: pName, dry_run, keep, keep_recent }) => {
+    async ({ provider: pName, dry_run, keep, keep_recent, max_age_days, unused_days }) => {
       const p = ctx.providers.get(pName);
       const models = await p.listModels();
       const loaded = p.ps ? (await p.ps()).map((l) => l.id) : [];
       const plan = pruneCandidates(models, {
         keep,
         keepRecent: keep_recent,
+        maxAgeDays: max_age_days,
+        unusedDays: unused_days,
+        lastUsed: unused_days !== undefined ? getModelUse() : undefined,
         defaultModel: p.defaultModel ?? ctx.config.default_model,
         loaded,
       });
@@ -491,6 +518,7 @@ export function registerManageTools(server: McpServer, ctx: ServerContext): void
           provider: p.name,
           ...plan,
           would_free_gb: Math.round(plan.wouldFreeBytes / 1e9 * 10) / 10,
+          ...(unused_days !== undefined ? { last_used: getModelUse() } : {}),
           note: "Re-run with dry_run=false to delete these models.",
         });
       }

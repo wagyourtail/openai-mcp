@@ -196,13 +196,14 @@ export class OllamaProvider implements Provider {
         size_vram?: number;
         expires_at?: string;
         processor?: string;
+        context_length?: number;
       }[];
     };
     return data.models.map((m) => ({
       id: m.name,
       sizeBytes: m.size_vram ?? m.size,
       processor: m.processor ?? (m.size_vram && m.size_vram < m.size ? "CPU/GPU" : "GPU"),
-      contextLength: 0,
+      contextLength: m.context_length ?? 0,
       expiresAt: m.expires_at,
     }));
   }

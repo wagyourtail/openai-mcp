@@ -123,7 +123,7 @@ In `~/.config/devin/config.json`:
 | `list_commits` / `revert_write` | Undo: `revert_write(commit_id)` stages a revert op restoring pre-commit content. |
 | `list_models` | Models per provider (sizes, capabilities, last-modified). |
 | `get_system_resources` | RAM + VRAM + loaded models (local ollama only). `ollama_gpu` reports which GPU(s) the server is pinned to (env vars) or observed using (runner process device fds). |
-| `recommend_model` | Rank installed models vs detected memory budget (pinned/observed GPU > discrete GPU > RAM); `apply:true` writes `default_model` to config and applies live. |
+| `recommend_model` | Rank installed models vs detected memory budget (pinned/observed GPU > discrete GPU > RAM) with three-way `fit` verdicts (`yes`/`marginal`/`no`). `apply:true` writes `default_model` to config and applies live; `model:"x:y"` + `apply:true` sets an explicit default. |
 | `search_models` | Search the public ollama registry for models — name, description, capability chips (tools/thinking/vision), parameter sizes, installed flag. |
 | `list_model_tags` | Pullable tags for a registry model (`gemma4` → `e4b`, `12b`, `26b`, …); `include_sizes:true` fetches real download sizes via the manifest API. |
 | `pull_model` | Download a model on ollama — background job, poll `get_job`. |
@@ -132,7 +132,7 @@ In `~/.config/devin/config.json`:
 | `download_model` | Download from Hugging Face via `hf` CLI (for llama.cpp/TabbyAPI/vLLM servers). Background job. |
 | `unload_model` | Free a model's VRAM. |
 | `delete_model` | Permanently delete a model (irreversible). Refuses to delete the provider default or a loaded model without `force:true`. |
-| `prune_models` | Bulk-delete old models. `dry_run:true` (default) reports candidates + reclaimable bytes; always keeps `keep[]`, the provider default, and loaded models. |
+| `prune_models` | Bulk-delete old models. `dry_run:true` (default) reports candidates + reclaimable bytes; always keeps `keep[]`, the provider default, loaded models, `keep_recent` newest, `max_age_days` recent pulls, and `unused_days` models used recently (per-model last-used is persisted to `model-usage.json` next to the config — models with no record are kept). |
 | `register_tool` / `unregister_tool` / `list_dynamic_tools` | Give the local agent new tools at runtime (`shell` templates or `js` snippets). |
 | `get_command_whitelist` / `update_command_whitelist` | Manage what `run_command` may execute. |
 | `get_usage_stats` / `get_server_info` | Session savings + effective config. |

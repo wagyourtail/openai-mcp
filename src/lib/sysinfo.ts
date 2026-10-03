@@ -26,6 +26,8 @@ export interface GpuInfo {
   totalMB?: number;
   usedMB?: number;
   freeMB?: number;
+  /** Where freeMB came from — "journal-boot" values are startup snapshots, may overstate. */
+  freeSource?: string;
   processes?: GpuProcess[];
 }
 
@@ -39,6 +41,12 @@ export interface SystemResources {
 export function normPci(s?: string): string {
   if (!s) return "";
   return (s.trim().toLowerCase().match(/([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])$/)?.[1]) ?? s.trim().toLowerCase();
+}
+
+/** Canonical display form "0000:04:00.0" — pads the domain when missing. */
+export function canonPci(s?: string): string {
+  const n = normPci(s);
+  return /^[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$/.test(n) ? `0000:${n}` : (s ?? "");
 }
 
 function vendorOf(name?: string): string | undefined {
@@ -375,6 +383,7 @@ export async function systemResources(): Promise<SystemResources> {
     try {
       const gpus = await p.fn();
       if (gpus.length) {
+        for (const g of gpus) if (g.freeMB !== undefined) g.freeSource = p.name;
         res.gpus = gpus;
         break;
       }
@@ -400,6 +409,7 @@ export async function systemResources(): Promise<SystemResources> {
       if (g.freeMB === undefined && g.totalMB !== undefined && g.usedMB !== undefined) {
         g.freeMB = g.totalMB - g.usedMB;
       }
+      if (g.freeMB !== undefined) g.freeSource ??= "sysfs";
     }),
   );
   return res;
@@ -531,7 +541,9 @@ export interface InferenceDevice {
   name: string;
   pci: string;
   totalMB: number;
+  /** Boot-time reading — journal only emits discovery lines at server start. */
   availMB: number;
+  asOf?: "startup";
 }
 
 /**
@@ -582,6 +594,7 @@ export function parseOllamaJournal(text: string): { env: Record<string, string>;
         pci: pciM?.[1] ?? "",
         totalMB: totalM ? (parseSizeMB(totalM[1], totalM[2]) ?? 0) : 0,
         availMB: availM ? (parseSizeMB(availM[1], availM[2]) ?? 0) : 0,
+        asOf: "startup",
       },
     });
   }
@@ -748,6 +761,24 @@ export interface OllamaGpuPlacement {
   note?: string;
 }
 
+/**
+ * GPU slots ollama processes appear on in a GPU tool's process list.
+ * <256MB allocations are backend probe contexts, not placement — a
+ * Vulkan-pinned llama-server still grabs ~3MB of CUDA context at startup.
+ */
+const PROBE_CONTEXT_BYTES = 256 * 1024 * 1024;
+export function procListGpuSlots(gpus: GpuInfo[]): string[] {
+  const slots = new Set<string>();
+  for (const g of gpus) {
+    for (const proc of g.processes ?? []) {
+      if (!OLLAMA_PROC_RE.test(proc.cmdline) || !g.pciSlot) continue;
+      if (proc.memBytes !== undefined && proc.memBytes < PROBE_CONTEXT_BYTES) continue;
+      slots.add(canonPci(g.pciSlot));
+    }
+  }
+  return [...slots].sort();
+}
+
 function envPins(env: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) if (GPU_ENV_VARS.includes(k)) out[k] = v;
@@ -770,9 +801,9 @@ export function resolvePinnedSlots(
   const slots = new Set<string>();
   const pciOf = (family: string, idx: number, vendor: string): string | undefined => {
     const d = devices.find((x) => x.family === family && x.index === idx);
-    if (d?.pci) return normPci(d.pci);
+    if (d?.pci) return canonPci(d.pci);
     const vg = gpus.filter((g) => g.vendor === vendor && g.pciSlot).sort((a, b) => a.index - b.index);
-    return vg[idx] ? normPci(vg[idx].pciSlot) : undefined;
+    return vg[idx] ? canonPci(vg[idx].pciSlot) : undefined;
   };
   for (const [k, v] of Object.entries(env)) {
     const nums: number[] = [];
@@ -810,7 +841,7 @@ export async function ollamaGpuPlacement(gpus: GpuInfo[]): Promise<OllamaGpuPlac
   };
   const procs = await findOllamaProcs();
   const cards = await drmCards();
-  const cardToPci = new Map(cards.map((c) => [c.cardN, normPci(c.pciSlot)]));
+  const cardToPci = new Map(cards.map((c) => [c.cardN, canonPci(c.pciSlot)]));
   const renderMap = await renderToCardMap();
   const inUseSlots = new Set<string>();
   const envNotes: string[] = [];
@@ -865,18 +896,26 @@ export async function ollamaGpuPlacement(gpus: GpuInfo[]): Promise<OllamaGpuPlac
 
   // Observed usage: runner fds first, then the GPU tool's process list.
   if (!inUseSlots.size) {
-    for (const g of gpus) {
-      for (const proc of g.processes ?? []) {
-        if (OLLAMA_PROC_RE.test(proc.cmdline) && g.pciSlot) inUseSlots.add(normPci(g.pciSlot));
-      }
-    }
+    for (const s of procListGpuSlots(gpus)) inUseSlots.add(s);
   }
-  out.gpus_in_use = [...inUseSlots].sort();
 
   const pins = envPins(out.env);
   const resolved = resolvePinnedSlots(pins, out.inference_devices, gpus);
   out.pinned_indices = resolved.indices;
   out.pinned_slots = resolved.slots;
+
+  // Probe-context floor + pinning inference: a llama-server under
+  // GGML_VK_VISIBLE_DEVICES still grabs a few MB of CUDA context during
+  // backend probing — tiny allocations are probes, not placement. And when
+  // nothing was observed at all (cross-user /proc fd denial), the pin env is
+  // the best placement evidence there is.
+  if (!inUseSlots.size && out.pinned_slots.length) {
+    for (const s of out.pinned_slots) inUseSlots.add(s);
+    out.note = out.note
+      ? `${out.note} gpus_in_use inferred from pinning (no process attribution available).`
+      : "gpus_in_use inferred from env pinning — no ollama process could be attributed to a GPU (cross-user /proc or idle).";
+  }
+  out.gpus_in_use = [...inUseSlots].sort();
 
   if (!Object.keys(pins).length && !out.gpus_in_use.length) {
     out.note =
