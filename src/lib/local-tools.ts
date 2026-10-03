@@ -5,6 +5,7 @@ import { stageWrite } from "./staging.ts";
 import { checkCommand, runWhitelisted, type CommandWhitelist } from "./whitelist.ts";
 import { searchFiles } from "./filesearch.ts";
 import { executeDynamicTool, getDynamicTool, listDynamicTools } from "./dynamic-tools.ts";
+import { applyEdits, parseEditBlocks } from "./edits.ts";
 
 const OBJ = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
@@ -103,6 +104,42 @@ export function buildLocalTools(deps: LocalToolDeps): LocalTool[] {
         );
         return `staged op ${op.id} (${op.existedBefore ? "modify" : "create"} ${op.path}). ` +
           `Pending review — do NOT assume it is on disk.`;
+      },
+    },
+    {
+      spec: {
+        name: "stage_edit",
+        description:
+          "Edit an EXISTING file via SEARCH/REPLACE hunks — prefer this over stage_write for " +
+          "changes to files you don't need to fully rewrite. Emit one or more blocks:\n" +
+          "<<<<<<< SEARCH\n<lines verbatim from file>\n=======\n<replacement>\n>>>>>>> REPLACE\n" +
+          "SEARCH must match the file exactly (indentation counts). Empty SEARCH appends at EOF. " +
+          "NOTHING is written to disk — the result is staged as a reviewable op.",
+        parameters: OBJ(
+          {
+            path: { type: "string", description: "Existing file to edit" },
+            edits: { type: "string", description: "The SEARCH/REPLACE block text" },
+            reason: { type: "string", description: "One-line rationale for this change" },
+          },
+          ["path", "edits"],
+        ),
+      },
+      async execute(args) {
+        const p = guard.resolve(String(args.path));
+        const content = (await guard.readFile(p)).content;
+        const blocks = parseEditBlocks(String(args.edits));
+        if (!blocks.length) {
+          return `error: no SEARCH/REPLACE blocks found — use exactly the "<<<<<<< SEARCH / ======= / >>>>>>> REPLACE" format`;
+        }
+        const res = applyEdits(content, blocks);
+        if (!res.ok) return `error on block ${res.block}: ${res.reason}`;
+        const op = stageWrite(
+          guard,
+          { path: p, content: res.content, source: "local_agent", reviewNote: args.reason ? String(args.reason) : undefined },
+          deps.stageTtlMs,
+        );
+        return `staged op ${op.id} (edit ${op.path}, ${res.applied} hunk${res.applied === 1 ? "" : "s"}` +
+          `${res.fuzzy.length ? ` — hunk(s) ${res.fuzzy.join(",")} matched loosely` : ""}). Pending review — do NOT assume it is on disk.`;
       },
     },
   ];

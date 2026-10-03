@@ -4,6 +4,7 @@ import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
 import { GEN_PARAMS, jsonResult, makeProgress, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { commitOp, discardOp, getOp, listCommits, listOps, revertCommit, stageWrite, uncommitOp } from "../lib/staging.ts";
+import { applyEdits, parseEditBlocks, type ApplyResult } from "../lib/edits.ts";
 import { patchConfig } from "../config.ts";
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
@@ -51,6 +52,86 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         op_id: op.id,
         path: op.path,
         kind: op.existedBefore ? "modify" : "create",
+        diff: op.diff,
+        usage,
+        note: ctx.writeMode === "write"
+          ? "Review the diff, then commit_write(op_id) or discard_write(op_id)."
+          : "Staged only (write_mode=propose): apply this diff with your own tools, or discard_write(op_id).",
+      });
+    },
+  );
+
+  server.registerTool(
+    "propose_edit",
+    {
+      description:
+        "Like propose_write, but the local model emits SEARCH/REPLACE hunks instead of the whole " +
+        "file — much more reliable on large files and small models. Server applies the hunks and " +
+        "stages the result as a normal op (same diff/commit flow).",
+      inputSchema: {
+        path: z.string().describe("File to edit (must exist — use propose_write for new files)"),
+        instruction: z.string().describe("What the local model should change"),
+        model: z.string().optional(),
+        provider: z.string().optional(),
+        num_ctx: z.number().int().optional(),
+        ...GEN_PARAMS,
+      },
+    },
+    async ({ path, instruction, model, provider: pName, num_ctx, ...gen }, extra) => {
+      const report = makeProgress(extra as ProgressExtra);
+      const { provider, model: m } = pickModel(ctx, pName, model);
+      const { content } = await ctx.guard.readFile(path); // must exist — throws otherwise
+      const SYSTEM =
+        `You edit files by emitting SEARCH/REPLACE blocks. For each change output exactly:\n` +
+        `<<<<<<< SEARCH\n<lines verbatim from the file>\n=======\n<replacement lines>\n>>>>>>> REPLACE\n` +
+        `Rules: SEARCH text must match the file EXACTLY including indentation. Multiple blocks allowed. ` +
+        `An empty SEARCH appends the replacement at end of file. Output ONLY blocks — no commentary, no fences.\n` +
+        `Instruction: ${instruction}`;
+      const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+        { role: "system", content: SYSTEM },
+        { role: "user", content: `File: ${path}\n\n${content}` },
+      ];
+      report(`editing: ${path}`);
+      // One repair attempt: feed a failed block back to the model.
+      let usage;
+      let applied: ApplyResult | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const r = await trackedChat("propose_edit", provider, {
+          model: m, temperature: 0.2, num_ctx, ...gen, messages: [...messages],
+        });
+        usage = r.usage;
+        const blocks = parseEditBlocks(stripFences(r.res.content));
+        if (!blocks.length) {
+          messages.push(
+            { role: "assistant" as const, content: r.res.content },
+            { role: "user" as const, content: "No SEARCH/REPLACE blocks found — output ONLY the blocks, verbatim format." },
+          );
+          continue;
+        }
+        const res = applyEdits(content, blocks);
+        if (res.ok) {
+          applied = res;
+          break;
+        }
+        messages.push(
+          { role: "assistant" as const, content: r.res.content },
+          { role: "user" as const, content: `Block ${res.block} failed: ${res.reason}. Emit the corrected blocks only.` },
+        );
+      }
+      if (!applied) {
+        return jsonResult({ error: "model could not produce applicable edit blocks after a retry", path, usage });
+      }
+      const op = stageWrite(
+        ctx.guard,
+        { path, content: applied.content, source: "propose_edit" },
+        ctx.config.limits.stage_ttl_s * 1000,
+      );
+      report(`staged: ${path}`);
+      return jsonResult({
+        op_id: op.id,
+        path: op.path,
+        hunks_applied: applied.applied,
+        fuzzy_hunks: applied.fuzzy.length ? applied.fuzzy : undefined,
         diff: op.diff,
         usage,
         note: ctx.writeMode === "write"
