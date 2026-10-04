@@ -86,6 +86,7 @@ In `~/.config/devin/config.json`:
   "permissions": {
     "allow": ["mcp__local_llm__chat", "mcp__local_llm__complete", "mcp__local_llm__summarize",
               "mcp__local_llm__extract", "mcp__local_llm__classify", "mcp__local_llm__map_files",
+              "mcp__local_llm__decide",
               "mcp__local_llm__run_local_agent", "mcp__local_llm__list_models",
               "mcp__local_llm__get_system_resources", "mcp__local_llm__list_staged",
               "mcp__local_llm__get_diff", "mcp__local_llm__discard_write",
@@ -118,6 +119,7 @@ In `~/.config/devin/config.json`:
 | `summarize` | Summarize files/globs server-side; only summaries return. |
 | `extract` | Structured JSON extraction, optional schema validation + retry. |
 | `classify` | Label text/files into candidate labels. |
+| `decide` | **Decision models** (ollama `/api/systemone` — `clef-flash`, `nimble`, `tev`). Scores 1–64 typed questions (`choice`/`score`/`noul`) about a state in one forward pass → calibrated probabilities per option. No generation, no parsing — prefer over `classify` when a decision model is installed. State comes from `state` text or files read server-side. Requires ollama ≥ the version with systemone support (check `ollama --version` — it's in main, post-0.35.1). |
 | `map_files` | Apply one instruction across a glob — `report` results or `stage_writes` for review. |
 | `propose_write` | Local model rewrites/creates one file → staged diff. |
 | `propose_edit` | Patch-style edit: the model returns `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` hunks instead of the whole file; the server applies them to current content and stages the result. Cheaper + safer than `propose_write` for localized changes — a non-matching hunk is a clean error, not a truncated file. |

@@ -92,6 +92,38 @@ export interface PullProgress {
   total?: number;
 }
 
+/**
+ * System One / decision-model request (ollama `/api/systemone`). A decision
+ * model scores typed questions about a state in one pass — no text generation,
+ * no output parsing. `criteria` shape depends on `type`: for "choice" it maps
+ * option keys to descriptions (null uses the key itself).
+ */
+export interface DecideQuestion {
+  type: "choice" | "score" | "noul";
+  instructions: string;
+  criteria?: Record<string, unknown>;
+}
+
+export interface DecideRequest {
+  model: string;
+  /** Content to evaluate — string, or any JSON value (non-strings are sent as JSON text). */
+  state: unknown;
+  /** 1–64 named questions. Answers are independent — no chaining. */
+  questions: Record<string, DecideQuestion>;
+  signal?: AbortSignal;
+}
+
+export interface DecideResult {
+  model: string;
+  /**
+   * Per-question answers, passed through from the API. Choice answers carry
+   * `choice` (winning key) + `probabilities`; noul answers carry `noul`
+   * (probability); score answers carry a `score` value.
+   */
+  answers: Record<string, unknown>;
+  usage?: { inputTokens?: number; outputTokens?: number };
+}
+
 export interface Provider {
   readonly name: string;
   readonly type: "ollama" | "openai";
@@ -111,6 +143,8 @@ export interface Provider {
   /** Delete a model's blobs (ollama /api/delete). Irreversible — re-pull to restore. */
   delete?(model: string): Promise<void>;
   show?(model: string): Promise<Record<string, unknown>>;
+  /** Decision-model scoring (ollama `/api/systemone`; clef/nimble/tev models). */
+  decide?(req: DecideRequest): Promise<DecideResult>;
 }
 
 export function isLocalUrl(baseUrl: string): boolean {

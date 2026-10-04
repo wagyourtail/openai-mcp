@@ -30,7 +30,7 @@ const devinMcpPath = join(devinDir, "mcp_config.json");
 const devinConfigPath = join(devinDir, "config.json");
 
 const ALLOW_TOOLS = [
-  "chat", "complete", "summarize", "extract", "classify", "map_files",
+  "chat", "complete", "summarize", "extract", "classify", "map_files", "decide",
   "run_local_agent", "list_models", "get_system_resources", "list_staged",
   "get_diff", "discard_write", "get_usage_stats", "list_dynamic_tools",
   "get_command_whitelist", "get_job", "list_jobs", "control_job",

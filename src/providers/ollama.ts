@@ -3,6 +3,8 @@ import type {
   ChatMessage,
   ChatRequest,
   ChatResult,
+  DecideRequest,
+  DecideResult,
   LoadedModel,
   ModelInfo,
   Provider,
@@ -233,5 +235,33 @@ export class OllamaProvider implements Provider {
       body: JSON.stringify({ model }),
     });
     return (await res.json()) as Record<string, unknown>;
+  }
+
+  async decide(req: DecideRequest): Promise<DecideResult> {
+    const body: Record<string, unknown> = {
+      model: req.model,
+      state: req.state,
+      questions: req.questions,
+    };
+    if (this.cfg.keep_alive) body.keep_alive = this.cfg.keep_alive;
+    const res = await this.req("/api/systemone", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: req.signal ?? null,
+    });
+    const data = (await res.json()) as {
+      model?: string;
+      answers?: Record<string, unknown>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    return {
+      model: data.model ?? req.model,
+      answers: data.answers ?? {},
+      usage: {
+        inputTokens: data.usage?.input_tokens,
+        outputTokens: data.usage?.output_tokens,
+      },
+    };
   }
 }

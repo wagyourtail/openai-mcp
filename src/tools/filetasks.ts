@@ -4,6 +4,7 @@ import type { ServerContext } from "../context.ts";
 import { pickModel } from "../context.ts";
 import { GEN_PARAMS, jsonResult, makeProgress, pool, stripFences, trackedChat, type ProgressExtra } from "./helpers.ts";
 import { stageWrite } from "../lib/staging.ts";
+import { recordUsage } from "../lib/usage.ts";
 import { validateSchema } from "../lib/schema-validate.ts";
 
 const COMMON = {
@@ -246,6 +247,85 @@ export function registerFileTaskTools(server: McpServer, ctx: ServerContext): vo
         report(`${done}/${sources.length}: ${src.label}`, done);
       }
       return jsonResult({ results, delegated_bytes: delegated });
+    },
+  );
+
+  server.registerTool(
+    "decide",
+    {
+      description:
+        "Decision-model scoring (ollama /api/systemone — clef / clef-flash / nimble / tev). " +
+        "Scores 1–64 TYPED questions about a state in ONE forward pass and returns calibrated " +
+        "probabilities per option — no text generation, no output parsing, no retries. Prefer " +
+        "over `classify` when a decision model is available: you get real probabilities instead " +
+        "of parsed JSON. Question types: 'choice' (criteria maps option keys→descriptions, null " +
+        "uses the key), 'score' (numeric scale), 'noul' (true/false). Requires an ollama provider " +
+        "running a decision model; a normal chat model returns an error. State is read " +
+        "server-side — files never enter your context.",
+      inputSchema: {
+        questions: z
+          .record(
+            z.string(),
+            z.object({
+              type: z.enum(["choice", "score", "noul"]),
+              instructions: z.string().describe("The question text"),
+              criteria: z
+                .record(z.string(), z.any())
+                .optional()
+                .describe("choice: option key → description (null = use key); shape varies by type"),
+            }),
+          )
+          .describe("Named questions, 1–64"),
+        state: z.string().optional().describe("Inline state (plain text or JSON text)"),
+        path: z.string().optional().describe("State from a file (read server-side)"),
+        paths: z.array(z.string()).optional().describe("Multiple state files"),
+        glob: z.string().optional().describe("Glob for state files"),
+        model: z
+          .string()
+          .optional()
+          .describe("Decision model, e.g. 'clef-flash:9b' (default: provider default_model)"),
+        provider: z.string().optional(),
+      },
+    },
+    async ({ questions, state, path, paths, glob, model, provider: pName }) => {
+      const { provider, model: m } = pickModel(ctx, pName, model);
+      if (!provider.decide) {
+        throw new Error(
+          `provider '${provider.name}' (${provider.type}) has no decision endpoint — ` +
+            `decide requires an ollama provider running a decision model (clef-flash, nimble, tev)`,
+        );
+      }
+      let statePayload: unknown;
+      if (path || paths?.length || glob) {
+        const sources = await collectSources(ctx, { path, paths, glob });
+        statePayload = [
+          ...(state !== undefined ? [{ text: state }] : []),
+          ...sources.map((s) => ({ file: s.label, content: s.content })),
+        ];
+      } else {
+        if (state === undefined) throw new Error("no state: provide `state`, `path`, `paths`, or `glob`");
+        try {
+          statePayload = JSON.parse(state);
+        } catch {
+          statePayload = state;
+        }
+      }
+      const t0 = Date.now();
+      const res = await provider.decide({ model: m, state: statePayload, questions });
+      recordUsage(
+        "decide",
+        {
+          provider: provider.name,
+          model: res.model,
+          promptTokens: res.usage?.inputTokens ?? 0,
+          completionTokens: res.usage?.outputTokens ?? 0,
+          elapsedMs: Date.now() - t0,
+        },
+        typeof statePayload === "string"
+          ? Buffer.byteLength(statePayload)
+          : Buffer.byteLength(JSON.stringify(statePayload)),
+      );
+      return jsonResult({ model: res.model, answers: res.answers });
     },
   );
 
